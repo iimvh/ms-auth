@@ -187,6 +187,21 @@ Two follow-ups, in order:
      in the history (a created file, a read path) means M365 truncated the
      context underneath us.
 
+### Limits differ by mode — handoff thresholds must too
+
+| Tier | Personal (free consumer) | Enterprise |
+|---|---|---|
+| Daily turn cap | **`CostQuota` 80/day** (reset 00:00 UTC), all models | none for ordinary models |
+| Per-conversation | 600 messages | 600 messages |
+| Thread rate | applies | **`PerUserThrottled`** — ~100 turns, refill ~1.6/min, ~1 h hold once tripped |
+| Per-model priority | none | Opus 5.5 40/day + 75/week; Sonnet 5.5 80/day + 150/week (only these) |
+
+Consequence: a handoff opens a new M365 conversation, and *conversations* are
+what the enterprise thread-rate throttle counts. So the threshold should differ
+by mode — hand off earlier on personal (a new thread there costs nothing beyond
+the turn, and the turn is already counted), later on enterprise
+(~85–90%, so a long pi session keeps one thread). Recorded here, not built.
+
 ## Smaller follow-ups agreed (not architecture)
 
 - **Gateway observability** (its weakest point): one INFO line per request —

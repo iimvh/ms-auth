@@ -1,0 +1,37 @@
+{
+  "name": "@m365-copilot/core",
+  "version": "0.2.0",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.mts"
+    }
+  },
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown src/index.ts src/personal-cli.ts --format esm --dts"
+  },
+  "bin": {
+    "m365-personal": "./dist/personal-cli.mjs"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^5.1.1",
+    "otpauth": "^9.5.0",
+    "playwright": "^1.58.2",
+    "ws": "^8.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

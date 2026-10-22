@@ -1,0 +1,352 @@
+# AGENTS.md
+
+Guidance for AI agents (and humans) working in this repo.
+
+## What this is
+
+`m365-copilot-proxy` wraps Microsoft 365 Copilot's undocumented SignalR/WebSocket
+API in an **OpenAI-compatible** interface so OpenAI-compatible coding agents (notably
+[pi](https://pi.dev/)) can use it as a model backend.
+
+**Read [`docs/m365-copilot-api.md`](docs/m365-copilot-api.md) before touching the
+protocol code** — it documents every quirk of the M365 API (auth, SignalR frames,
+tones, throttling, the "Disengaged" filter, Copilot Studio agents). It is the source
+of truth; keep it in sync if you change protocol behaviour.
+
+[`docs/hypotheses.md`](docs/hypotheses.md) is the open-questions notebook —
+tool-call compliance experiments, the search for token/context-window data, the
+"how do we improve this proxy" backlog. Update it whenever an experiment lands.
+
+[`docs/prompt-engineering.md`](docs/prompt-engineering.md) is the distilled
+reference for **prompting the Copilot model into tool-calling** — the load-bearing
+levers, the confirmed dead-ends, and the A/B scoreboard. Read it before tinkering
+with framing/format.
+
+**Where findings graduate to.** `docs/hypotheses.md` is the *messy, in-progress*
+layer. Once a finding is **decently conclusive** (real evidence, not n=1 noise),
+promote it out of the notebook into the right reference doc so it isn't lost:
+- **Protocol / API behaviour** (frames, auth, tones, throttling, Disengaged,
+  agents) → [`docs/m365-copilot-api.md`](docs/m365-copilot-api.md).
+- **Prompting / tool-calling strategy** (what framing/format makes the model act,
+  what backfires) → [`docs/prompt-engineering.md`](docs/prompt-engineering.md).
+Leave a one-line pointer + evidence reference behind in the notebook.
+
+## Operating principles (read first)
+
+Hard-won defaults for working on this proxy. Internalize these before touching anything.
+
+1. **Always run sequentially — one thread at a time.** The rate limit is real but
+   weird: it tracks *conversations/threads started per unit time*, not messages (F13),
+   and it surfaces as `Disengaged`-looking 502s that are actually throttle. Never fire
+   concurrent requests, and never loop fresh conversations back-to-back. Space experiment
+   runs out (generous cooldowns between threads). A real pi/openclaw session — one long
+   thread, many messages — is cheap; it's our *experiments* (a new thread per task) that
+   burn the thread budget and trigger the throttle.
+
+2. **Chase all hunches — tangents are encouraged.** This is an undocumented API we're
+   reverse-engineering. The moment you think *"oh, maybe X works like this"* — stop and
+   test it. A probe that teaches us something true about the system is often worth more
+   than the task it interrupted. Don't suppress an idea because it's off the current
+   thread. Record what you learn in [`docs/hypotheses.md`](docs/hypotheses.md).
+
+3. **The end goal is always a usable agent in pi or openclaw.** Every change exists to make
+   this proxy drop into pi/openclaw and actually drive a real coding loop. A clever protocol
+   finding that doesn't move that needle is a footnote, not a win. Validate wins through a
+   real harness, not only the bench.
+
+4. **Be scientific: hypothesize → predict → test → conclude.** Turn every "I think X" into a
+   falsifiable hypothesis with the cheapest probe that settles it. Don't ship on a plausible
+   inference when the live API or the bench can decide it. Log it with sample size + an
+   evidence pointer.
+
+5. **Prompt tinkering: try N *wildly different* things at once, then let the data pick the
+   direction.** Never iterate on the first idea — that's how you spin in loops re-trying
+   variations of the same thing. Generate N genuinely distinct strategies (N = however many
+   real ideas you have), A/B them all on the bench in **one** sweep, read the scorecard, and
+   conclude a direction from the result. *Then* go deep on the winner.
+
+**Things easy to forget (added during the June 24 framing-sweep):**
+
+- **`Disengaged` is driven by jailbreak *shape*, not size (F10) — so a "stronger", more
+  aggressive ALL-CAPS prompt can itself trip the filter.** When tinkering (#5), always
+  include *leaner/softer* variants, not just heavier ones; the heavier prompt is often the
+  one that disengages. Watch `usage.x_m365_dea_score` — M365's own disengagement-eligibility
+  score — it rises *before* Disengaged fires (clean tool calls ~1e-8, prose ~1e-6,
+  jailbreak-shaped ~1e-3).
+- **n=1 is noise.** One SOLVED/Disengaged is a single sample on a stochastic,
+  throttle-confounded backend. Confirm a winner with `--repeat`, and control for order
+  effects (rotate strategy order across runs) before believing any number.
+- **Native tool-calling is permanently OUT OF SCOPE.** MCP / a full Dataverse bot need a
+  Copilot Studio license, which breaks the zero-cost premise (§8.11). Tangents (#2) are
+  great — but don't re-open this one; it's a closed dead-end. Tool calling stays
+  prompt-emulated.
+
+## How we work — hypothesis-driven (default)
+
+This is a reverse-engineering project against an undocumented API. **The default
+mode is science: turn every "I think X" into a testable hypothesis, design the
+cheapest probe that would confirm or kill it, run it, and record the result.**
+Don't guess what works — measure it. Don't stop at a plausible inference when the
+live API or the benchmark can settle it. Always be looking for the next testable
+hypothesis that teaches us something.
+
+- **Log every hypothesis in [`docs/hypotheses.md`](docs/hypotheses.md)** with a
+  falsification criterion and a probe idea; update it when an experiment lands
+  (confirmed / disproved, with sample size + evidence pointer).
+- **[`docs/experiments.md`](docs/experiments.md) is the runnable catalog** — each
+  experiment is a hypothesis + exact commands + how to read the result. Reach for
+  it to *run* something; add to it when you design a new experiment.
+- **Probes live in `scripts/`** — small, single-purpose, read-mostly. Reuse
+  `scripts/_probe-chat.mjs` (one M365 turn in → structured result out; supports
+  `optionsSets` / `extraAllowed` / `plugins` / `variants` / `tone` / agent
+  overrides) and copy an existing probe rather than starting from scratch.
+- **Quantify with the benchmark** — `scripts/bench/` (Terminal-Bench-style) scores
+  real agentic coding tasks objectively, executing every tool call in a
+  `--network none` Docker sandbox. To compare *any* lever (tool format, model/tone,
+  prompt, optionsSets) run it with a `--label` and diff the scorecards in
+  `scripts/bench/out/`. "Best" is a pass-rate number, not an opinion. For a framing or
+  proxy-env sweep use `scripts/bench/phase-sweep.sh`, and read it back with
+  `scripts/bench/analyze-arms.mjs`, which also says what happened on the wire (agent path,
+  sandbox, Disengaged) and drops tasks lost to the network. See `scripts/bench/README.md`.
+- Prefer empirical evidence — what the real first-party client sends/receives
+  (capture it with Playwright), what the bench scores — over schema guesses.
+
+## Layout (pnpm workspace, all TypeScript/ESM)
+
+| Package | Role |
+|---|---|
+| `@m365-copilot/core` | auth (MSAL+Playwright), WebSocket client, sessions, agent mgmt, tool formatting, schemas |
+| `@m365-copilot/proxy-lib` | OpenAI↔M365 translation: framework-free `createApp()` fetch handler, `SessionPool`, handler, tool-call parsing |
+| `@m365-copilot/proxy` | standalone **Nitro** service / proxy binary (`m365-proxy`); file-based `routes/`, startup-auth `plugins/`, builds to `.output/` |
+| `@m365-copilot/openclaw-plugin` | OpenClaw config generator + setup CLI |
+
+`scripts/` holds RE probes + dev tools (`_probe-chat` helper, `proxy-verify`,
+frame/optionsSets/tone probes, `gateway-*` captures) and **`scripts/bench/`** — the
+quantitative benchmark. See the hypothesis-driven section above.
+
+## Build & test
+
+```sh
+pnpm install
+pnpm build          # tsdown, all packages (tests import from dist/, so build first)
+pnpm test           # = test:unit; pure unit tests, NO auth/network
+pnpm test:live      # M365_LIVE=1; live tests that hit real M365 (uses quota)
+```
+
+- ESM with `.js`-suffixed relative imports (tsdown/Node ESM). Keep that convention.
+- Zod for boundary validation. No `console.log` in library code — use `createLogger`.
+- `vitest run` skips live tests unless `M365_LIVE=1` (see `describe.skipIf`).
+
+## Running against real M365 (important)
+
+- **Run inside the Nix dev shell**: `nix develop --command bash -c '...'`. It provides
+  `CHROMIUM_PATH` (a system Chromium; Playwright's bundled one is broken on NixOS), pi, python3
+  and curl. Run the bench scripts in it too: `nix develop --command bash scripts/bench/phase-sweep.sh`.
+- Auth uses `~/.config/opencode-m365/secrets.json` (email/password/mfaSecret) +
+  `msal-cache.json`. **This data dir keeps the legacy `opencode-m365` name** — do not
+  rename it or you orphan working credentials.
+- Set `M365_DEBUG=1` to log to `~/.config/opencode-m365/debug.log` (`M365_LOG_FILE` renames it and
+  `M365_FRAME_DIR` moves the `M365_DUMP_FRAMES` dumps, both relative to that directory). There is **no
+  interactive login** — auth is silent-refresh → automated (secrets.json) → fail loudly.
+  A headless host / second PC never opens a browser tab or hangs on a paste-the-URL prompt.
+- **Mind the quota**: ~600 messages **per conversation**, plus account-level throttling.
+  Don't burn it on loops. A "rate limited / empty response" is often actually a
+  `Disengaged` refusal (see the API doc), not throttling.
+
+## Gotchas to know before you "fix" something
+
+- **Tool calling needs the Copilot Studio agent AND the fenced/shell format.** The agent
+  alone isn't enough — the old JSON `{"tool":...}` format scored 0/5 on real agentic tasks
+  and was **removed**. Tools are now emitted as Markdown fences, and the load-bearing lever
+  is **shell-routing**: M365's chat model won't act-as-agent but will write a ```` ```bash ````
+  block, which the proxy routes to the harness's shell tool. That + the per-request shell
+  framing (`formatFencedToolDefinitions`) is what produces real loops. See docs/hypotheses.md §9.
+- **Prompt *framing* can't flip the turn-1 reflex; format/routing can.** 8 per-request
+  behavioral-prompt variants moved nothing (0 tool calls); heavy anti-advise framing in the
+  agent *backfired*. Don't try to wordsmith the model into acting — route its natural ```` ```bash ````.
+- **The agent is versioned by an instructions hash.** Its name is
+  `m365-tool-agent-<sha256(instructions)[:8]>`, so editing `getAgentInstructions()` auto-
+  provisions a fresh agent on the next request. Stale versions are **always left in place**
+  (we never delete agents), which avoids the multi-host footgun where a host on new code
+  would delete the agent another host/PC is still using mid-conversation. A few orphaned
+  lightweight bots are harmless. `updateBotInstructions()` is still dead code — we re-create
+  rather than update in place. See API doc §10.
+- **Reasoning tones don't work with the agent.** `*-think-deeper` (and bare `gpt-5.4`) route through
+  the `DeepLeo` reasoning pipeline, which meta-analyzes the injected prompt instead of
+  obeying it. Only the default `magic` and the chat tones (`*_Chat`, what the `*-quick` IDs
+  resolve to) behave. The model can't be bound
+  to our (declarative `minimalBots`) agent type at all — see API doc §10 *Agent types*.
+- **The `*_Quick` tones are retired — `*_Chat` replaced them. Don't map or probe a `*_Quick` tone.**
+  The validator now rejects `Gpt_Quick` and `Gpt_5_{2,3,4}_Quick`, and the unversioned `Gpt_Chat` /
+  `Gpt_Reasoning` too. The `quick` / `*-quick` model IDs stay as aliases (never remove
+  `MODEL_TONES` keys; re-point them), and the generic `quick` / `think-deeper` pin to GPT-5.5.
+  **Prefer GPT-5.5 over GPT-5.6 for both, and for the default**: 5.5 wins the chat half of the
+  bench (16/30 vs 7/30) and the reasoning half is a tie (26/30 vs 27/30, confab-retry off), so
+  don't re-point them to 5.6 on the strength of the reasoning numbers.
+  `scripts/tone-probe.mjs` ends with a `MAPPED:` line that flags any mapped tone that isn't LIVE.
+  See docs/hypotheses.md §19.
+- **M365 disengages on large tool payloads.** Keep injected toolsets lean. This is why
+  pi works and heavy harnesses (opencode) don't. The proxy also enforces one tool call per
+  turn and strips M365's invented `{confidence}`/`{final}` JSON (`M365_ALLOW_MULTI_TOOL` to opt out).
+- **`claude-opus` is entitlement-gated and separately metered.** The WS `scenario` decides which
+  model serves: `Claude_Opus` is Opus 5.5 on `OfficeWebPaidCopilot` and another model, Opus 4.8 (below), on
+  `OfficeWebIncludedCopilot` (`getScenarioForModel`, derived per-turn from the model ID).
+  `licenseType: Premium` pairs with it but unlocks nothing alone. Opus 5.5 also has a small
+  priority-access budget — 75/week (`ClaudeOpusQuery75`) and 40/day (`ClaudeOpusQueryDaily`), **one unit
+  per turn whatever the prompt size** — so a leaner framing saves nothing; only fewer turns do
+  (the proxy's own retries count too). The refusal is **not streamed**: it is only in the final
+  item (`result.value: "OutOfCredits"`, `result.message`), so a stream reader sees an empty turn —
+  read the result (`priorityAccessExhaustionOf`), not the text. The proxy 429s, remembers the wall
+  until the reset (midnight UTC; weekly: Monday) and, with `M365_OPUS_FALLBACK_MODEL=claude-opus-4.8`,
+  serves Opus 4.8 instead. Every paid turn carries `throttling.metering` (surfaced in `usage`).
+  **Sonnet 5.5 has the same kind of budget, its own** (80/day `ClaudeSonnet55QueryDaily`, 150/week
+  `ClaudeSonnet55QueryWeekly` — which has reset daily, not on Monday, §30; `M365_SONNET_FALLBACK_MODEL`). Budgets live in `METERED_BUDGETS`
+  (`priority-access.ts`) and `meteredBudgetOf()` maps a model to one; walls are remembered per budget.
+  A new `*Query*` key in `metering` is how a new metered model shows up — add a budget, don't hard-code Opus.
+  Don't burn it on sweeps. See docs/hypotheses.md §15, §24 F55, F59 (issue #18), §26.
+- **`claude-opus-4.8` is the same tone on the included scenario — only on a premium account, and
+  unmetered.** It replaced Opus 4.5 (`claude-opus-4.5`, now an alias) unannounced between Oct 4 and
+  Oct 11 2026, so re-run the self-ID probes now and then. Opus 4.5 served only through the tool agent;
+  Opus 4.8 serves agent-less too, so tool-less requests go without it. On a non-premium account it is
+  the dead route on both paths: there is no fallback (it is NOT in `PREMIUM_ONLY_AGENT_TONES`), and
+  `isPremiumOnlyModel` turns the `InternalError`s into a 502 that says so. Its tool requests keep the
+  agent (§36): agent-less ties on the bench but costs 22% more turns in real pi (F90), and has its own
+  code interpreter, which it works in under a framing that doesn't steer it out (`baseline` 1/10 vs
+  8/10), and writes its own `<tool_response>`s (13 of 134 turns, 0 with the agent; F91). Routing is the
+  mirror of Sonnet 5.5: the tone is paid and the model ID opts back into the included scenario
+  (`INCLUDED_SCENARIO_MODELS`, plus `opus-4-8` / `opus-4-5`-style strings). Both Opus models carry the
+  agent on tool requests (`AGENT_CLAUDE_TONES`) and default to `relay_batch`: every framing solved on Opus 4.5,
+  so rank framings by Disengaged turns and turns per task, not the solve rate — the `<system>`-tagged
+  ones tripped the jailbreak classifier on a third of tasks (§24 F56), and relay_batch's "put as much
+  as you can into one block" cut turns per task 37% (F60), which is what Opus 5.5's budget counts. Opus 4.5 sometimes ended a tool fence with its native call
+  markup (`</invoke>`, `</parameter>`…); the parser strips it (F57), on its own line or glued to the last one (Sonnet 5.5 too), don't "simplify" that away. A call the model writes again as a correction ("Oops… here is the same command") replaces the first copy rather than counting as two. Only a premium account can
+  bench it. See docs/hypotheses.md §24, §36.
+- **Entitlement-gated ≠ metered.** `gpt-6-think-deeper` (`Gpt_6_Reasoning`) and `claude-sonnet-5`
+  (`Claude_Sonnet_5`) need the same paid
+  scenario as Opus but carry **no** priority-access budget and throttle like everything else,
+  so `PAID_SCENARIO_TONES` is about reaching a model, not about what it costs. Don't key metering
+  or framing decisions off that set — metering is `meteredBudgetOf()`, the quota detector reads
+  `OutOfCredits`, and the framing
+  default is per-model (Opus `relay_batch` for its turn-counted budget and the jailbreak classifier,
+  §24 F56/F60; GPT-6 a user-voice relay for its sandbox, batched since §25 — see the agent bullet
+  below). See docs/hypotheses.md §17, §22, §25.
+- **One tone can be two models — `Claude_Sonnet` is Sonnet 4.6 (included) and Sonnet 5.5 (paid);
+  `Claude_Sonnet_5` is Sonnet 4.6 (included) and Sonnet 5 (paid).** Microsoft swapped the paid
+  `Claude_Sonnet` from Sonnet 5 to 5.5 on 2026-10-06 and moved Sonnet 5 to the new tone, unannounced
+  (self-ID + a new `metering` key gave it away), so re-run the self-ID probes now and then.
+  So routing follows the **model ID** (`getScenarioForModel`, `PAID_SCENARIO_MODELS`), and so does
+  the framing default (`defaultFramingForModel`). Never add `Claude_Sonnet` to
+  `PAID_SCENARIO_TONES` — that silently turns `claude-sonnet` into Sonnet 5.5 (and spends its
+  budget). `Claude_Sonnet_5` is in that set because nothing maps it for 4.6. A liveness probe can't
+  see this (all are `DeepLeo`); only self-ID can. See docs/hypotheses.md §21, §26, #37.
+- **Sonnet 5 has its own tools in a remote sandbox (Sonnet 5.5 too) and reads `<system>` tags as an injection.**
+  Nothing client-side disables `bash_tool`/`create_file` (`/home/claude`), and a `<system>` block in
+  the user turn makes it disregard the framing and work there ("no such file"). Its default is the
+  user-voice `relay` framing (45/50 vs 6/40; 5/5 in real pi). Sonnet 4.6 beat baseline with relay too
+  (78/90 vs 47/76) and now defaults to `relay_batch` (same solves, −21% turns in real pi, §25 F62);
+  batching saved Sonnet 5 only 6% in pi, so `SONNET_5_DEFAULT_FRAMING` keeps it on relay (F63) — the
+  one place the Sonnets differ; Sonnet 5.5 (same `/home/claude` sandbox, §26) inherits relay via
+  `SONNET_5_5_DEFAULT_FRAMING`, unbenched. `relay_batch` is plain relay when the toolset has no shell: asked
+  for a script it couldn't run, Sonnet 4.6 claimed it had only its sandbox tools (§25 H25b) — and
+  `proxy-verify --tools` is shell-less. Don't move `Claude_Sonnet` back to a `<system>`-tagged variant, and don't wrap the note
+  in `<user>` tags either: tags are just text to it, and the variant that did (`relay_inline`,
+  removed) scored 1/20 (§21 F43).
+  **Read its `ChainOfThoughtSummary` frames** (`M365_DUMP_FRAMES=1`) — they say why it refused.
+- **Not every tone serves with the tool agent — `toneUsesToolAgent()` decides, per exact tone**
+  (`M365_FORCE_AGENT=1`/`0` overrides it either way).
+  Claude tones (except `Claude_Opus`, see above) and `Gpt_6_Reasoning` go agent-less even with tools.
+  `Claude_Sonnet` and `Claude_Sonnet_5` were benched with the agent on a premium account (§30 F75): it
+  removes the sandbox of Sonnet 4.6, Sonnet 5 and Sonnet 5.5, but Sonnet 5 (`Claude_Sonnet_5` @ paid)
+  then refuses the harness and Sonnet 4.6 (`Claude_Sonnet` and `Claude_Sonnet_5` @ included) spends a
+  turn more per pi run — don't add them.
+  That extra turn is the agent path's own: four other agent instruction texts didn't move it (§34 F87).
+  With the agent attached GPT-6 is
+  a dead route on every account (`result: InternalError`; the proxy used to 502 on it, #41), and
+  Claude is dead on non-premium accounts. Add a tone to `AGENTLESS_TOOL_TONES` only after
+  `scripts/agent-tone-probe.mjs` says so. Agent-less also means M365's code interpreter is on, and under `baseline` GPT-6
+  worked there instead of acting (0/30); relay fixed that (30/30; 5/5 in real pi), and its default is now
+  `relay_batch` (20/20 at a third fewer turns, 10/10 in real pi). See docs/hypotheses.md §22, §25.
+- **Some tones take the agent only on a premium account — and nothing on the token says which
+  account this is.** `Gpt_6_Sol_Reasoning` (`gpt-6-sol`) serves with the agent on a premium account
+  and is the dead route (`InternalError`) on a non-premium one. It is in `PREMIUM_ONLY_AGENT_TONES`:
+  the first tool request carries the agent, and the handler turns a no-content `InternalError` into
+  "this account isn't premium" (`noteAgentRouteDead`, process-lifetime) and re-sends agent-less —
+  unless the agent already answered for that tone (`noteAgentRouteAlive`): premium accounts emit the
+  same `InternalError` as a rare transient (§23 F52). Run
+  `agent-tone-probe.mjs` on **both** kinds of account before classifying a new tone. Agent-less, GPT-6
+  Sol has its own sandbox that `M365_NO_CODE_INTERPRETER` does not remove; only the user-voice framings
+  get it to solve (60/60 vs ≤6/10), though it still looks into the sandbox on some tasks, harmlessly.
+  relay wins with the agent too (30/30), and its default is now
+  `relay_batch` on both paths (−32% turns, 60/60 + 40/40 bench, 30/30 real pi). F61 kept it on relay over 4 vs 2
+  sandbox turns; the retest found 13 vs 15, so one small gap is not a reason to hold a default back
+  — rerun it. See docs/hypotheses.md §23, §28.
+  `Gpt_61_Sol_Reasoning` (`gpt-6.1-sol`) splits the same way and is also routed on the included scenario:
+  its paid scenario serves too but spends a `GPT61Sol*` budget (40/day, 75/week), so don't add it to
+  `PAID_SCENARIO_TONES`. Its default is `relay_batch` too: it didn't add sandbox
+  turns, and it cut turns 17–47% at 40/40 bench, 30/30 real pi. See docs/hypotheses.md §27.
+  Agent-less the two are the same to the bench (same solves and turns, framing by framing), except
+  that GPT-6.1 Sol stays out of its sandbox when the user-voice note says to (relay_batch: 0 of 80
+  tasks and pi runs) and GPT-6 Sol looks in on about a quarter of them (25 of 100) — harmless, but a
+  fingerprint: the included scenario's GPT-6.1 Sol isn't GPT-6 Sol renamed (§29 F72).
+- **A turn can hold several bot messages; assemble text per message.** Each new message's head
+  arrives only as a snapshot with a `cursor`; folding everything into one string drops it (it ate
+  a fence's backticks). `TurnTextComposer` in `session.ts` — don't "simplify" it away. #29.
+- **A conversation is keyed on the first user message *and* the tool names** (`SessionPool.fingerprint`).
+  opencode's title request shares the task's opener but has no tools; keyed on the opener alone it ran in
+  the task's M365 conversation, concurrently (#83). Don't add the system prompt or tool descriptions to
+  the key: those are where a harness puts per-turn text, and every change starts a new thread.
+- **A tool turn is stopped once the model's own `<tool_response>` after a call runs past 2,000 chars**
+  (#65, `runBuffered` in `handler.ts`): waiting for M365 to finish let invented continuations run for
+  minutes, past pi's timeout. Not at the tag itself: M365 keeps the whole message, Sonnet 4.6 seems to
+  follow a short tail as its plan, and stopping at the tag cost it 10% more turns in real pi; the
+  2,000-char cap costs none measurable and still ends the runaways (hyp §35 F88, F89). The
+  after-the-fact cut stays; the stop only ends the turn sooner. `M365_EARLY_STOP_AFTER` sets the cap
+  (`0` = at the tag), `M365_NO_EARLY_STOP=1` opts out.
+- **Array/object tool params come back in two shapes; the parser reads both.** The tools block shows
+  `edits: <edits>`. Opus writes inline JSON (`edits: [{…}]`); Sonnet 4.6 writes a YAML block list under
+  an empty `edits:`, which used to arrive as `edits: []` — 44 of its 47 pi `edit` calls, each a wasted
+  round trip (#50). `parseYamlBlockValue` in `fenced.ts` reads the YAML subset models write; keep both
+  paths. The bench can't catch a regression here (no array-typed tools), so test with real pi's `edit`.
+  Multi-line *strings* have a shape of their own: in a tool whose params are all header lines (no
+  body, no edit pair; opencode's `edit` with `oldString`/`newString`) the model writes `oldString: <first
+  line>` and the rest of the text below it, so a string value runs on to the next `key:` line (#82). A
+  tool with a body still ends its header at the first line that isn't `key:`; don't extend the run-on to it.
+- **Account degradation is THREAD-rate, not message-count** (docs/hypotheses.md §9 F13).
+  Microsoft throttles *conversations started*, not messages sent — the per-conversation
+  counter resets each thread. A bench that opens one fresh conversation per task burns the
+  thread budget fast; a real pi session (one long thread, many messages) is fine. When
+  everything starts empty-503-ing, it's thread-throttle, **not** the Disengaged content
+  filter (check: no `messageType:"Disengaged"` → it's throttle). **It is explicit on the wire:**
+  the final `type:2` item says `result.value:"Throttled"`, `errorCode:"PerUserThrottled"`, and
+  the proxy now returns 429 `m365_throttled` without retrying (#35). ~190 fresh threads in a
+  day tripped it on the premium account. The bench and phase-sweep stop at the first throttled
+  task, and `TASK_GAP` paces bench tasks. F58's per-turn bucket fits the onsets better than any
+  thread count, and by it a busy pi session drains the account too: every turn takes one, mid-thread
+  or not. `M365_AVOID_THROTTLING=1` waits for that bucket: the bench before each task, the proxy
+  before each upstream turn, inside the open stream (§37). The model is `packages/core/src/turn-budget.ts`;
+  `scripts/bench/turn-budget.mjs` re-exports it, so tune it in one place. **A fresh login does NOT clear it:** the throttle is
+  keyed on the account's `oid`, which a new token keeps (API doc §2/§7, hypotheses §11 H-R1 —
+  F13's "fresh login clears it" was n=1 and confounded with a rest). It lifts with idle time,
+  which is why the proxy's degradation backoff replaced the old auto-reauth. Space experiment
+  runs; don't loop new conversations.
+- The `nativeclient` OAuth redirect bounces to `/common/wrongplace`; the auth code is
+  scraped from the navigation request, not a settled URL.
+
+## Verifying changes end-to-end
+
+```sh
+# proxy smoke + tool call + multiturn (run unsandboxed, inside nix develop):
+nix develop --command bash -c 'M365_DEBUG=1 node scripts/proxy-verify.mjs --tools --multiturn --model=claude-sonnet'
+```
+
+`--tools` is load-bearing — without it no tools are sent and "NO TOOL CALL" is the
+correct result, not a failure. Use a **Claude** model: those route agent-less,
+which is the path that tool-calls (~5s). The `m365-copilot` default resolves to
+the magic tone, which does not tool-call right now and confabulates "no
+file-reading tool is available to me" — that is upstream's current state, not a
+regression, so don't chase it (re-confirmed 2/2 on 2026-09-21; §9 F-route).
+
+## Conventions
+
+- Conventional Commits (`fix:`, `feat:`, `docs:`, `chore:`, `build:`). No `Co-Authored-By` lines.
+- Small, focused files; handle errors explicitly; prefer immutable updates.

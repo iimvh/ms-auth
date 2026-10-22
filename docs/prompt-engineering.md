@@ -1,0 +1,258 @@
+# Prompt-engineering M365 Copilot into tool-calling
+
+Distilled, **conclusive** findings on how to make M365 Copilot's chat-tuned model
+emit usable tool calls — enough to drive a real agent loop in pi/openclaw. This is
+the reference layer: the protocol lives in [`m365-copilot-api.md`](m365-copilot-api.md),
+the messy in-progress experiments in [`hypotheses.md`](hypotheses.md). Promote things
+here once they're settled with evidence (not n=1).
+
+> **Methodology reminder** (see [`../AGENTS.md`](../AGENTS.md) → Operating principles):
+> run sequentially (thread-rate throttle), try **N wildly different** strategies in
+> one bench sweep rather than iterating on the first idea, and confirm winners with
+> `--repeat` before believing a number. n=1 is noise.
+
+## The cage theory (why this is hard)
+
+Microsoft's server-side BizChat system prompt sits **above** ours in priority and
+defines the model as a *retrieval chat assistant*. So instructions of the form
+"be an agent / emit a tool call on demand" are refused or meta-analysed away — the
+model decides to answer in prose or hallucinate a result **before** it would act.
+We don't fight the cage; we use the one arm-hole it leaves open (see shell-routing).
+
+## The load-bearing levers (confirmed)
+
+These are what actually move compliance. In rough order of importance:
+
+1. **The Copilot Studio agent (server-side system prompt).** Without it, M365 ignores
+   the per-request tool instructions and answers in prose. It is *the* lever, not the
+   syntax. ([api §10](m365-copilot-api.md), [hyp §1].)
+2. **Shell-routing — the unlock.** The model won't "act as an agent" but **will**
+   reflexively write a ```` ```bash ```` block. The proxy executes that block as the
+   harness's shell tool (any name: `bash`/`run`/`run_command`/…). This is what turned
+   the bench from **0/5 → real multi-turn loops** (a verified 9-tool-call fix-bug solve).
+   ([hyp §9 F12].)
+3. **Fenced format, not JSON.** Tools are emitted as Markdown code fences (info-string
+   = tool name), not `{"tool":…}` JSON. JSON scored **0/5** on real agentic tasks; the
+   multi-line-body escaping burden was a prime suspect. ([hyp §8.12, §9].)
+4. **Anti-confabulation + first-move framing.** Explicitly telling the model it has run
+   nothing yet, the files are real, and its FIRST output must be a ```` ```bash ```` block
+   flips the stochastic turn-1 "I can't access the files, please paste them" reflex toward
+   complying. ([hyp §9 F14].)
+5. **Proxy-side hardening** (deterministic, behind the model): document guard
+   (`isProseDocument` — don't execute a model's own markdown answer, but a reply that *opens*
+   with a tool call is an action), confab retry, hallucinated-completion retry, tool-result
+   labelling, one-call-per-turn, stripping invented `{confidence}`/`{final}` JSON, treating a
+   model-written `<tool_response>` as a stop sequence (Sonnet 4.6 invents one in about half
+   its turns; the turn is stopped once that tail passes 2,000 chars, #65), and telling the model on
+   the next turn when only its first call ran. See
+   [`tool-calling.md`](tool-calling.md), [hyp §20 F39, F41].
+
+## Claude Sonnet: don't *cage* it, don't *label* things `<system>`
+
+Everything above was learned on models with no tools of their own. Sonnet 5 (`Claude_Sonnet` on
+the paid scenario at the time, `Claude_Sonnet_5` since 2026-10-06 — Sonnet 5.5 has the same sandbox,
+hyp §26) **has** real ones, in a remote sandbox, so the question is not "will it act"
+but "on which machine" — and our framing decides that. Conclusive (hyp §21, p = 3×10⁻¹³):
+
+- **A `<system>` block inside the user turn reads as a forged system prompt.** Its reasoning says
+  "prompt injection", it ignores the framing and works in its own sandbox, where the task's files
+  don't exist. Relabelling the *same* baseline text `<harness_instructions>` took it 1/10 → 9/10
+  and mostly stopped it deliberating at all. For this model the tag is the trigger, not the words.
+- **Ask for an ordinary role, not belief in a mechanism.** "My harness executes your fenced blocks"
+  (`honest`) invites a check against its system prompt, and it concludes the harness can't exist.
+  "Guide me through my terminal, one command at a time; I'll paste the output back" (`relay`,
+  shipped default) is just pair-programming: 45/50 against baseline's 6/40, and 5/5 in real pi.
+- **Say the sandbox is the wrong machine.** Without it (`retag`) the model starts right but falls
+  back to its own `bash_tool` the first time a harness command returns nothing useful.
+- **Too short fails too:** a one-line "don't use your tools" note (`terse_user`) is 2/10 — it reads
+  as an unexplained override.
+- **A `<user>` tag doesn't make the note the user's.** On the wire the whole proxy prompt is one
+  user message, and Sonnet 5 reads tags inside it as embedded text. Moving the relay note into a
+  `<user>` block (`relay_inline`, tested and removed) made the setup read as a fabricated
+  transcript: 1/20 vs relay's 9/10, with 19 of 20 first turns calling it a prompt injection (hyp
+  §21 F43). Whether the tag or the harness block now coming first is to blame is not yet separated.
+- **Sonnet 4.6 has the same reflex, weaker.** It rarely refuses, but says "this appears to be a
+  system-level automated agent prompt embedded in a user message" and then hedges. `relay` is its
+  default too: 78/90 vs baseline's 47/76 (p = 3×10⁻⁴, hyp §21 F42).
+- **The tool agent takes the sandbox away, and that isn't a fix** (hyp §30, premium account). With
+  the agent none of Sonnet 4.6, Sonnet 5 and Sonnet 5.5 works in its own sandbox, and Sonnet 4.6
+  solves under every framing (99% vs 82% agent-less over 17 framings; the gap is all in the
+  `<system>`-tagged ones). But Sonnet 5 then reads the agent's enterprise tools in its context
+  against the harness and disowns it ("I'm Microsoft 365 Copilot, and I don't have access to a
+  shell…"; 10/20 vs 19/20), and Sonnet 4.6 stops batching in real pi: it reaches for pi's `edit`
+  and checks in a call of its own, one turn more per run. Under the shipped user-voice framings,
+  agent-less already solves 193/200, so `Claude_Sonnet` and `Claude_Sonnet_5` stay agent-less.
+
+## GPT-6 / GPT-6 Sol: `relay` is not just a Claude fix
+
+The relay note was written for Sonnet 5, but the two GPT-6 tones need it more. Both run
+agent-less next to a sandbox of their own (GPT-6 always; GPT-6 Sol on non-premium accounts), and
+every framing that tells the model it *is* an agent with a real shell sends it to that sandbox,
+where the task's files don't exist: GPT-6 baseline 0/30 vs relay 30/30 (hyp §22 F47); GPT-6 Sol
+0–6/10 for baseline, minimal, session_facts, demo_only and react vs relay 60/60 (hyp §23 F51).
+Turning M365's code interpreter off doesn't help Sol (0/20). With the agent attached (Sol on a
+premium account) there's no sandbox, but the cage framings still lose to relay (3–9/10 vs 30/30):
+the model confabulates "I can't access your working directory from this chat", even after a
+successful `cat`. relay removes the question: the user runs the commands, so the model needs no
+belief about its own access. **Lesson:** for any new reasoning tone, put `relay` in the first sweep.
+GPT-6 and GPT-6 Sol now run the batching relay (`relay_batch`, below): a third fewer turns. For
+GPT-6 Sol that took a second look: agent-less, its first run sent it to its sandbox on 4 turns against
+relay's 2 (hyp §25 F61), the retest on 40 tasks per framing found 13 against 15 (hyp §28 F71), and
+pooled the two are level (17 and 17 in 60 tasks). GPT-6.1 Sol
+(hyp §27) repeats GPT-6 Sol's pattern (agent-less baseline 0/20, minimal 2/20, every user-voice framing
+19–20/20) and runs `relay_batch` too (no sandbox turn under it; 40/40 bench, 30/30 real pi, 17–47% fewer
+turns). **Lesson:** don't hold a default back on a gap of a few rare events; rerun with more tasks.
+Side by side agent-less (hyp §29 F72), GPT-6.1 Sol and GPT-6 Sol solve and spend turns alike under
+every framing, so the framing results carry over between them; what differs is whether the model
+obeys the note: under relay_batch GPT-6.1 Sol went into its sandbox on 0/40 tasks (0/80 with the
+earlier bench and pi), GPT-6 Sol on 6/20 (25/100 overall), and under `honest` 3/40 vs
+17/20. The user-voice note is what makes both solve; how literally a model takes it is per model, and
+doesn't cost solves either way.
+
+## Claude Opus: when every framing solves, count the Disengages
+
+Opus 4.5 (`claude-opus-4.5`, with the tool agent) solved ~100% of the bench under every framing
+tried — so the solve rate couldn't rank them. The jailbreak classifier could: the `<system>`-tagged
+rule framings tripped it on 20 of 60 tasks (`minimal` 12/30, `baseline` 8/30), relay and `softened`
+on 0 of 80 (p = 5×10⁻⁹; hyp §24 F56), always on "find the secret" / "edit the config" prompts. The
+proxy's retry rescues those, but each one is a dead turn plus a fresh conversation — thread budget,
+and on metered Opus 5.5 possibly a priority-access unit. Two smaller lessons from the same sweep:
+- **A framing without `<system>` tags needs to stay clear of the classifier by itself.** The retry
+  swaps only `<system>`-tagged framings for `softened`; `retag` and `terse_user` were retried as
+  themselves, disengaged again and failed (4 tasks). relay never needed the retry.
+- **A shorter prompt doesn't save Opus quota.** `minimal` was the default for that reason; the
+  budget counts turns (hyp §24 F55). Choose for fewer turns and fewer Disengages instead.
+relay over softened (tied on the bench) because it carries no `<system>` tags, which Sonnet 5 reads
+as an injection; Opus 5.5, which shares the default, went 10/10 with it (hyp §24 F59). **Lesson:** when
+the solve rate saturates, rank framings by Disengaged turns and turns per task.
+
+**Turns per task is a framing lever too** (hyp §24 F60). Opus 5.5's budget is per turn, so it matters
+there. Asking for batching works: "Each round trip takes me a while, so put as much as you can into one
+block" (`relay_batch`) took Opus 4.5 from 3.65 to 2.30 turns per bench task at 20/20 solved.
+Real pi agreed: 3.5 turns per run vs 6.0, 10/10 each. It is the
+Opus default (both models). The cost to watch: a batched block acts before it has seen any output —
+in pi every edit still came after a read. Opus 4.8, which replaced Opus 4.5 on `claude-opus-4.8` in
+October 2026, went 30/30 with it at 2.53 turns per task, with the agent (hyp §36 F90). Agent-less it
+has a code interpreter of its own, and the user-voice note is what keeps it out: under `baseline` it
+worked there and reported on files it never touched (1/10), under relay_batch it never went in (F91).
+
+**It carries to other models unevenly — measure in real pi, not only on the bench** (hyp §25). The
+bench's turn savings: GPT-6 and GPT-6 Sol −33%, Sonnet 4.6 −14%, Sonnet 5 −15%. In pi: GPT-6 Sol −19%
+with the agent and −25% without (hyp §28), Sonnet 4.6 −21%, Sonnet 5 only −6% (relay already reads,
+fixes and checks in ~5 turns). Savings come from tasks
+one script can finish; fix-bug and config edits barely move. **And batching needs a shell:** with a
+read-only toolset, "a script can look at the files…" made Sonnet 4.6 announce it had only its own
+sandbox tools (3/7 vs relay 6/6, H25b), so `relay_batch` is plain relay when there is no shell tool.
+
+## What does NOT work (confirmed dead-ends — don't re-litigate)
+
+- **Wording-only per-request variants.** 8 behavioural-prompt rewrites (alone /
+  env-is-real / first-move-forcing / batch-persona / verify-contract / terse /
+  combined) each moved **nothing** (0 tool calls). Wording alone can't flip the turn-1
+  reflex. ([hyp §9 "What did NOT work".]) → *the lever is format/routing, not adjectives.*
+- **Heavy anti-advise framing baked into the AGENT** (server-side): **backfired**,
+  suppressing even illustration-fence tool calls to 0. The agent prompt is now
+  minimal/format-only; behavioural framing lives in the per-request `<tools>` block.
+- **Context-seeding** (injecting a real `ls`/`cat` before the task): the model reads the
+  primed info as "task complete" and says "Done" with 0 tools.
+- **`tool_choice: "required"`** translated to a prompt rule: forces bogus `bash()` calls
+  on pure-prose questions ("what is 7×8?"). Pass it through as advisory only. ([hyp F3].)
+- **Reasoning tones + agent** (`*-think-deeper`, bare `gpt-5.4`, `DeepLeo`): the pipeline
+  meta-reasons over the injected prompt instead of obeying it — it will critique your
+  few-shot and reason itself *out* of tools. Use `magic` / a chat tone (`*-quick` →
+  `*_Chat`; the `*_Quick` tones are retired). ([api §10].)
+- **Native tool-calling (MCP / full Dataverse bot):** out of scope — needs a paid Copilot
+  Studio license, breaking the zero-cost premise. ([hyp §8.11].)
+- **Moving the Claude Sonnet note into the first `<user>` block** (`relay_inline`, removed):
+  Sonnet 5 1/20 vs relay's 9/10 in the same session (p = 7×10⁻⁶); Sonnet 4.6 unaffected (19/19 vs
+  20/20). ([hyp §21 F43].)
+
+## Constraints that bite while tinkering
+
+- **`Disengaged` tracks jailbreak *shape*, not size** ([hyp F10]). A "stronger", more
+  aggressive ALL-CAPS prompt can itself trip the filter — so a **leaner/softer** prompt
+  can out-score a heavier one. Always include lean variants in a sweep. Watch
+  `usage.x_m365_dea_score` (clean tool calls ~1e-8, prose ~1e-6, jailbreak-shaped ~1e-3);
+  it rises before Disengaged fires.
+- **Keep the toolset lean.** Heavy harnesses (opencode's ~15 tools) get empty Disengaged
+  replies; pi's lean set works. ([api §9].) A heavy harness can often be *made* lean —
+  but note that opencode's own config/hook levers do not affect the outgoing request, so
+  the trim has to happen in the proxy. ([api §9, "Trimming a heavy harness"].)
+- **Measure on *unfakeable* tasks.** The model hallucinates success on tasks it can answer
+  from memory (fizzbuzz, count-lines) with 0 tool calls; only unfakeable tasks (fix-bug,
+  find-needle, edit-config) force real calls. ([api §10 "measurement traps"].)
+- **Bench ≠ pi.** The bench's short prompt is more compliant than pi's polished one; a
+  bench win can still confab turn-1 under real pi. Confirm winners live. ([hyp F14].)
+
+## The framing-variant registry (how to A/B strategies)
+
+The per-request `<tools>` framing is the **live, no-reprovision lever**. Strategies are
+registered in `packages/core/src/fenced.ts` (`FRAMING_VARIANTS`) and selected per-request:
+
+- `M365_FRAMING_VARIANT=<name>` (env), or
+- `M365_FRAMING_FILE=<path>` → first line of the file names the active variant, so **one
+  long-lived proxy switches strategy per request** without a restart (used by the sweep).
+
+Current strategies: `baseline` (shipped default, unchanged), `minimal`, `recency`,
+`fewshot`, `proof_demand`, `persona`, `react`, `negative`, `terse`, `softened`, `demo_only`,
+`session_facts`, `reply_tool` (synthetic `reply()` tool; also `M365_INJECT_REPLY_TOOL=1`), and the
+Claude Sonnet set: `retag`, `honest`, `terse_user`, `relay`, and the turn-saving `relay_batch`
+(hyp §24 F60, §25). A variant can also change
+the transcript's **tags** (`transcriptStyleForVariant`): the Claude Sonnet set never emits `<system>`;
+the harness's own system prompt becomes `<harness_system_prompt>`.
+
+**The default is model-aware** (`defaultFramingForModel`, falling back to `defaultFramingForTone`).
+`Claude_Opus` (Opus 4.8 and 5.5), `Claude_Sonnet` (as Sonnet 4.6), `Gpt_6_Reasoning`,
+`Gpt_6_Sol_Reasoning` (hyp §28) and
+`Gpt_61_Sol_Reasoning` (GPT-6.1 Sol, hyp §27) → `relay_batch`; Sonnet 5 (`claude-sonnet-5`, its own `Claude_Sonnet_5` tone since 2026-10-06) and
+Sonnet 5.5 (`claude-sonnet-5.5`, `Claude_Sonnet` on the paid scenario, keyed on the model ID;
+inherits Sonnet 5's relay, hyp §26) → `relay` — though on the bench relay_batch cut its turns by a
+third (3.35 → 2.20, 40/40, both paths, hyp §30); real pi decides, ~90 budget units. **Every other model keeps `baseline` byte-for-byte** (including
+`claude-sonnet-think-deeper`, unmeasured under relay), so no GPT-5.x bench number moves, and
+`M365_FRAMING_*` still wins. Opus used to default to `minimal`, to spend less of its priority-access
+budget by sending a shorter prompt; that budget counts turns, not tokens (docs/hypotheses.md §24
+F55), so it saved nothing — see the Opus section below for why relay_batch replaced it.
+
+**Run a sweep** (persistent proxy + control file; sequential, generously spaced):
+
+```sh
+# 1. one persistent proxy pointed at the control file
+M365_FRAMING_FILE=/tmp/m365-framing M365_DEBUG=1 node packages/proxy/bin/m365-proxy.mjs 4141 &
+# 2. sweep all strategies × discriminating tasks, rotated order, big cooldowns
+COOLDOWN=45 BLOCK_COOLDOWN=60 bash scripts/bench/sweep2.sh
+# 3. aggregate into a strategy × task matrix + leaderboard
+node scripts/bench/analyze-sweep.mjs s2
+```
+
+For the full 10-task bench per arm, with a fresh proxy per arm (so a phase can also change
+the proxy's env: agent off, code interpreter off) and real-pi arms, use `phase-sweep.sh`, then
+read the archive back with `analyze-arms.mjs`. It reports per arm which path served each task,
+sandbox and Disengaged turns, and drops tasks lost to the network or a throttle
+(scripts/bench/README.md):
+
+```sh
+MODEL=gpt-6-sol TAG=mysweep PHASES='A:baseline,relay,demo_only|B@M365_FORCE_AGENT=0:relay,pi=fix-bug' \
+  nix develop --command bash scripts/bench/phase-sweep.sh
+nix develop --command node scripts/bench/analyze-arms.mjs ~/.config/opencode-m365/sweeps/mysweep --compare relay demo_only
+```
+
+The older single-phase route also archives each arm's debug log + frame dumps for
+forensics — read the `ChainOfThoughtSummary` frames, they say *why* a framing was refused:
+
+```sh
+# starts a proxy per arm; `default` = the model's shipped default; arms may repeat
+M365_NO_CONFAB_RETRY=1 ARMS="default retag relay default" MODEL=claude-sonnet-5 TAG=mysweep \
+  bash scripts/bench/sonnet5-sweep.sh
+```
+
+## Results
+
+### June 24 2026 — 10-strategy framing sweep — ⏳ IN PROGRESS
+
+First head-to-head of all 10 strategies on the unfakeable tasks (`fix-bug`,
+`find-needle`, `edit-config`), n=1, sequential with 45s/60s cooldowns. Scorecard
+(strategy × task matrix + leaderboard) to be filled in from
+`scripts/bench/analyze-sweep.mjs s2` once the run completes, then the winner
+confirmed with `--repeat` and validated through real pi.
+
+_Update this section with the matrix, the conclusion, and the chosen direction._

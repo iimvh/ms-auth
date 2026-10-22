@@ -1,0 +1,1188 @@
+import WebSocket from "ws";
+import type { ImageAnnotation } from "./image-input.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import {
+  SignalRHandshakeResponse,
+  DeltaUpdate,
+  MessageUpdate,
+  ThrottlingUpdate,
+  CompletionFrame,
+  CloseFrame,
+} from "./schemas.js";
+import {
+  decodeJwt,
+  getScenarioForModel,
+  getToneForModel,
+  type CopilotStream,
+  type CapturedImage,
+} from "./copilot.js";
+import {
+  parseActionConfirmation,
+  buildResumeInvokeAction,
+  shouldAutoConfirm,
+  ACTION_ALLOWED_MESSAGE_TYPES,
+} from "./native-actions.js";
+import { createLogger, trunc, FRAME_DIR } from "./log.js";
+import { recordThrottle, recordTurn } from "./turn-budget.js";
+import { parseMetering, meteredAllowance, METERED_BUDGETS, type MeteredBudget } from "./priority-access.js";
+import { isPersonalMode, shouldSendCodeInterpreter } from "./personal-mode.js";
+import { PersonalAuthError, personalLoginCommand } from "./personal-auth.js";
+import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
+import { PersonalStore, personalSessionFile } from "./personal-session.js";
+
+const RS = "\x1E";
+const log = createLogger("session");
+
+// The exact frame the real m365.cloud.microsoft "Stop generating" button sends
+// (captured June 2026, scripts/cancel-frame-capture.mjs). It's a normal type:1
+// invocation with target "stop" and invocationId "1" (distinct from chat's "0"),
+// sent on the same socket; the server acks with a type:3 completion and discards
+// the partial answer. See docs/m365-copilot-api.md §6 and hypotheses.md F11.
+const STOP_FRAME = JSON.stringify({ arguments: [{}], invocationId: "1", target: "stop", type: 1 }) + RS;
+
+// Enabling these optionsSets unlocks M365's real server-side Python sandbox:
+// the model writes and EXECUTES Python and returns true results (verified with a
+// SHA-256 oracle — docs/hypotheses.md §8.9 / scripts/code-interpreter-probe.mjs).
+// Applied only on the agent-less (plain-chat) path: the tool-calling agent wants
+// the model to emit tool JSON, not run its own Python, so we leave that path
+// untouched. Disable with M365_NO_CODE_INTERPRETER=1.
+const CODE_INTERPRETER_OPTIONS_SETS = [
+  "cwc_code_interpreter",
+  "cwc_code_interpreter_amsfix",
+  "cwc_code_interpreter_citation_fix",
+  "code_interpreter_interactive_charts",
+  "code_interpreter_matplotlib_patching",
+];
+
+// The image-generation optionsSets, lifted verbatim from the official web client
+// capture (§14). `flux_v3` is BizChat's orchestration codename, NOT the model —
+// artifacts come back DallE-named. The GUI sends this WHOLE set on every turn and
+// lets the model pick the type from the prompt (standard / icon / story / designer
+// dimensions), which is why "draw me X" works with no UI toggle — so we match it:
+// send everything the GUI enables. Excludes only the GPT-V/upload family, which is
+// image *input* (a separate capability), not generation. `…non_watermarked_storage`
+// keeps the artifact unwatermarked.
+const IMAGE_GEN_OPTIONS_SETS = [
+  "cwc_flux_image",
+  "cwc_flux_v3",
+  "enable_gg_gpt",
+  "flux_v3_progress_messages",
+  "flux_v3_image_gen_enable_dimensions",
+  "flux_v3_image_gen_enable_icon_dimensions",
+  "flux_v3_image_gen_enable_story",
+  "flux_v3_image_gen_enable_designer_dimensions_meta_prompting_in_system_prompts",
+  "flux_v3_image_gen_enable_system_text_with_params",
+  "flux_v3_image_gen_enable_non_watermarked_storage",
+];
+
+// --- Optional per-request frame dumping for reverse engineering ---
+// Enabled by M365_DUMP_FRAMES=1. Every SignalR frame received is appended to a
+// per-request NDJSON file under FRAME_DIR (~/.config/opencode-m365/frames/, or
+// M365_FRAME_DIR). Cheap to run in production; gives us forensic data when M365
+// starts emitting new fields.
+const DUMP_FRAMES = !!process.env.M365_DUMP_FRAMES;
+function dumpFrame(requestId: string, parsed: unknown, direction: "recv" | "send") {
+  if (!DUMP_FRAMES) return;
+  try {
+    mkdirSync(FRAME_DIR, { recursive: true });
+    appendFileSync(
+      join(FRAME_DIR, `${requestId}.ndjson`),
+      JSON.stringify({ t: Date.now(), dir: direction, frame: parsed }) + "\n",
+    );
+  } catch {
+    // best effort
+  }
+}
+
+const VARIANTS = [
+  "EnableMcpServerWidgets",
+  "feature.EnableMcpServerWidgets",
+  "feature.EnableLuForChatCIQ",
+  "feature.enableChatCIQPlugin",
+  "EnableRequestPlugins",
+  "feature.EnableSensitivityLabels",
+  "EnableUnsupportedUrlDetector",
+  "feature.IsCustomEngineCopilotEnabled",
+  "feature.bizchatfluxv3",
+  "feature.enablechatpages",
+  "feature.enableCodeCanvas",
+  "feature.turnOnWorkTabRecommendation",
+  "turnOffWorkTabUpsellFromClient",
+  "feature.turnOnDARecommendation",
+  "feature.IsStreamingModeInChatRequestEnabled",
+  "IncludeSourceAttributionsConcise",
+  "SkipPublishEmptyMessage",
+  "feature.EnableDeduplicatingSourceAttributions",
+  "Enable3PActionProgressMessages",
+  "feature.enableClientWebRtc",
+  "feature.EnableMeetingRecapOfSeriesMeetingWithCiq",
+  "feature.EnableReferencesListCompleteSignal",
+  "feature.StorageMessageSplitDisabled",
+  "feature.EnableCuaTakeControlApi",
+  "feature.cwcallowedos",
+  "feature.disabledisallowedmsgs",
+  "feature.enableCitationsForSynthesisData",
+  "feature.enableGenerateGraphicArtOptionsSet",
+  "cdximagen",
+  "feature.EnableUpdatedUXForConfirmationDialog",
+  "feature.EnableClientFileURLSupportForOfficeWebPaidCopilot",
+  "feature.EnableDesignEditorImageGrounding",
+  "feature.EnableDesignerEditor",
+  "feature.OfficeWebToHelix",
+  "feature.OfficeDesktopToHelix",
+  "feature.M365TeamsHubToHelix",
+  "feature.OwaHubToHelix",
+  "feature.MonarchHubToHelix",
+  "feature.Win32OutlookHubToHelix",
+  "feature.MacOutlookHubToHelix",
+  "Agt_bizchat_enableGpt5ForHelix",
+].join(",");
+
+/**
+ * Fold one incoming piece of streamed text — a token DeltaUpdate (passed as
+ * `answer + writeAtCursor`) or a full-text MessageUpdate snapshot — into the
+ * running answer, returning the new answer and the suffix to stream (if any).
+ *
+ * M365 mixes token deltas with full-text snapshots, and the first token often
+ * arrives ONLY as a snapshot, so naive delta concatenation drops the head. The
+ * rules:
+ *  - `next` no longer than the current answer → no growth, emit nothing.
+ *  - `next` extends the current answer → advance and emit the appended suffix.
+ *  - `next` is longer but DIVERGES (doesn't start with the current answer, e.g. a
+ *    snapshot carrying a head the deltas never sent) → adopt it as authoritative
+ *    for the buffered result but emit nothing: already-streamed bytes can't be
+ *    retracted, so we never stream a non-prefix (which would dup/corrupt).
+ * This keeps every emitted suffix a true prefix of the final answer.
+ */
+export function foldStreamText(
+  answer: string,
+  next: string,
+): { answer: string; emit: string | null } {
+  if (next.length <= answer.length) return { answer, emit: null };
+  if (next.startsWith(answer)) return { answer: next, emit: next.slice(answer.length) };
+  return { answer: next, emit: null };
+}
+
+/** The messageId a streaming `cursor` points at: `$['<id>'].adaptiveCards[0]…`. */
+export function cursorMessageId(j: string | undefined): string | null {
+  const m = j?.match(/^\$\['([^']+)'\]/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Reassemble one turn's text from M365's PER-MESSAGE stream.
+ *
+ * A turn can carry several bot messages (distinct messageIds): Claude narrates
+ * in one and writes its tool fence in the next, and Sonnet 5 interleaves text
+ * with its own tool calls. Each message streams the same way — its first token
+ * usually arrives only as a snapshot that carries a `cursor` naming the message,
+ * then `writeAtCursor` deltas that carry NO messageId and extend whatever the
+ * cursor last named, then a final snapshot.
+ *
+ * Folding all of that into ONE string (what foldStreamText alone did) loses the
+ * head of every message after the first: the new message's head snapshot is
+ * shorter than the accumulated answer, so it is dropped, and its deltas get
+ * glued onto the previous message — `…the SECRET_CODE.bash\ngrep…`, a fence
+ * with no opening backticks, so the tool call never parses (#29). Every
+ * multi-message turn in the Sep 28 dumps was corrupted this way.
+ *
+ * Messages are kept separately and composed in order of first appearance,
+ * separated by a blank line (they are separate bubbles in the real client).
+ */
+export class TurnTextComposer {
+  private texts = new Map<string, string>();
+  private target: string | null = null;
+
+  /** A cursor frame: subsequent deltas extend message `id`. */
+  cursor(id: string): void {
+    this.target = id;
+  }
+
+  /** A full-text snapshot of one message. Before any cursor has been seen, the
+   *  snapshot's message also becomes the delta target (older frame shapes). */
+  snapshot(id: string | undefined, text: string): void {
+    const key = id ?? this.target ?? "";
+    if (this.target === null) this.target = key;
+    this.texts.set(key, foldStreamText(this.texts.get(key) ?? "", text).answer);
+  }
+
+  /** A token delta for the message the cursor last named. */
+  delta(text: string): void {
+    const key = this.target ?? "";
+    this.texts.set(key, (this.texts.get(key) ?? "") + text);
+  }
+
+  get text(): string {
+    return [...this.texts.values()].filter((t) => t.length > 0).join("\n\n");
+  }
+}
+
+/**
+ * Attach a native custom action/plugin to a conversation and drive the confirm→invoke
+ * round-trip over the WS (docs/hypotheses.md §12.6, H-NATIVE-6/7). All fields are
+ * best-effort passthroughs modelled on the decompiled client; the exact inline-def
+ * schema still wants a live `SEND_MSG=1` capture, so run with M365_DUMP_FRAMES=1 to
+ * see what the server actually does and refine.
+ */
+export interface NativeActionConfig {
+  /** Inline agent definitions (`gptDefinitions[]`) — the no-sideload agent attach. */
+  gptDefinitions?: unknown[];
+  /** `clientOverrides.capabilities[]` entries (e.g. {name:"RegisteredPlugins", plugins:[…]}). */
+  capabilities?: unknown[];
+  /** `plugins[]` entries ({Id, Source, Data?}). Merged even when an agent is attached. */
+  plugins?: unknown[];
+  /** Approve consequential (state-mutating) actions too. Default: only read-only ones. */
+  autoConfirmAll?: boolean;
+}
+
+/** Per-turn chat options. */
+export interface ChatTurnOptions {
+  /** Request server-side image generation for this turn (§14). Adds the flux
+   *  optionsSets + the GenerateGraphicArt allowedMessageType; the generated
+   *  images surface on `stream.images`. Agent-less only. */
+  generateImages?: boolean;
+  /** Uploaded images this turn's message points at (image-input.ts). */
+  images?: ImageAnnotation[];
+}
+
+export interface CopilotSessionOptions {
+  agentId?: string;
+  /** Reuse an existing session ID across reconnections. */
+  sessionId?: string;
+  /** Reuse an existing conversation ID so M365 finds the same server-side conversation. */
+  conversationId?: string;
+  /**
+   * Ask M365 for a temporary chat by adding `disableMemory=1` to the Chathub URL.
+   * Temporary chats retain context for their live ConversationId but are not
+   * added to the Copilot history sidebar. Default: true.
+   */
+  temporaryChat?: boolean;
+  /** Enable native custom-action support (H-NATIVE-6/7). Off = unchanged behaviour. */
+  nativeActions?: NativeActionConfig;
+}
+
+/**
+ * Build the authenticated Chathub URL. Kept as a pure helper so privacy-critical
+ * query flags can be verified without opening a network connection.
+ */
+export function buildCopilotWebSocketUrl(
+  objectId: string,
+  tenantId: string,
+  params: URLSearchParams,
+): string {
+  return `wss://substrate.office.com/m365Copilot/Chathub/${objectId}@${tenantId}?${params}`;
+}
+
+/** Per-turn query params for the personal path: the captured connection
+ *  values (scenario, variants, licenseType, …), not the enterprise scenario
+ *  table — except `M365_SCENARIO`, which still wins if set (operator
+ *  override, spec §6.4). `disableMemory=1` is still added by the same place
+ *  that adds it today when `temporaryChat`. */
+export function personalTurnParams(
+  capture: PersonalCapture,
+  ids: { requestId: string; sessionId: string; conversationId: string },
+): URLSearchParams {
+  return new URLSearchParams({
+    chatsessionid: ids.requestId,
+    clientrequestid: ids.requestId,
+    "X-SessionId": ids.sessionId,
+    ConversationId: ids.conversationId,
+    access_token: capture.accessToken,
+    variants: capture.variants,
+    source: capture.source,
+    agentHost: capture.agentHost,
+    licenseType: capture.licenseType,
+    agent: "web",
+    scenario: process.env.M365_SCENARIO ?? capture.scenario,
+    ...(capture.product === null ? {} : { product: capture.product }),
+  });}
+
+/** The Chathub URL for the captured session: same host as the enterprise
+ *  path, but the connection identity comes from the capture, not a JWT's
+ *  oid@tid claim. */
+export function buildPersonalChathubUrl(
+  capture: Pick<PersonalCapture, "chathubPath">,
+  params: URLSearchParams,
+): string {
+  return `wss://substrate.office.com/m365Copilot/Chathub/${capture.chathubPath}?${params}`;
+}
+
+/** The record backing a personal turn. The pre-flight (Task 7 /
+ *  ensurePersonalCredentials) guarantees one exists; if it still does not —
+ *  or is corrupt — fail with the same "run login" error, not a mystery 401. */
+export function readPersonalRecord(): PersonalRecord {
+  const store = new PersonalStore(personalSessionFile());
+  const record = store.read();
+  if (!record) {
+    throw new PersonalAuthError(
+      "session_dead",
+      `M365 personal session expired — run: ${personalLoginCommand()}`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Headers for the Chathub WebSocket upgrade.
+ *
+ * `X-RoutingParameter-SessionKey` pins every turn of a conversation to one
+ * backend. Each turn is a new connection, and without the key the Substrate
+ * front end spreads them over pods in two regions (`x-calculatedbetarget`:
+ * 4–6 distinct in 6 handshakes on one ConversationId, Switzerland North and
+ * Sweden Central), which keep separate copies of the conversation. The model
+ * then answers from whichever copy the turn landed on: in real pi runs 53% of
+ * turns ran on an older copy, missing the model's own earlier calls and their
+ * results (docs/hypotheses.md F85). With the key: 1 backend in 6. The query-string form
+ * doesn't pin. M365_NO_SESSION_ROUTING=1 leaves it out.
+ */
+export function buildCopilotWebSocketHeaders(conversationId: string): Record<string, string> {
+  return {
+    "Origin": "https://m365.cloud.microsoft",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    ...(process.env.M365_NO_SESSION_ROUTING ? {} : { "X-RoutingParameter-SessionKey": conversationId }),
+  };
+}
+
+/** Headers for the personal (consumer) Chathub socket. The consumer substrate
+ *  cancels the handshake ("Handshake was canceled.") unless the upgrade looks
+ *  like the real Windows Chrome client: the browser UA plus the cache and
+ *  encoding headers it always sends. Cookie/Turnstile proof are NOT needed once
+ *  this matches (F103, live replay). Do NOT hand-set Sec-WebSocket-Extensions:
+ *  the websocket lib negotiates permessage-deflate itself, and a manual copy
+ *  makes it skip decompression — the stream then dies as "Unexpected end of
+ *  JSON input" on the first compressed frame (F105). */
+export function buildPersonalWebSocketHeaders(conversationId: string): Record<string, string> {
+  return {
+    Origin: "https://m365.cloud.microsoft",
+    "User-Agent": process.env.M365_PERSONAL_UA ??
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    ...(process.env.M365_NO_SESSION_ROUTING ? {} : { "X-RoutingParameter-SessionKey": conversationId }),
+  };
+}
+
+/**
+ * A persistent conversation session with M365 Copilot.
+ * Reuses the same sessionId/conversationId across turns,
+ * reconnecting the WebSocket for each message.
+ */
+export class CopilotSession {
+  private sessionId: string;
+  private conversationId: string;
+  private _turnCount = 0;
+  private agentId?: string;
+  private nativeActions?: NativeActionConfig;
+  private temporaryChat: boolean;
+
+  constructor(options?: CopilotSessionOptions) {
+    this.sessionId = options?.sessionId ?? crypto.randomUUID();
+    this.conversationId = options?.conversationId ?? crypto.randomUUID();
+    this.agentId = options?.agentId;
+    this.nativeActions = options?.nativeActions;
+    this.temporaryChat = options?.temporaryChat ?? true;
+    log.info(`New session: sid=${this.sessionId}, cid=${this.conversationId}, agent=${this.agentId ?? "none"}, nativeActions=${!!this.nativeActions}, temporaryChat=${this.temporaryChat}`);
+  }
+
+  /** Number of turns completed in this session */
+  get turnCount(): number {
+    return this._turnCount;
+  }
+
+  /**
+   * Send a message in this conversation and stream the response.
+   * Each turn opens a fresh WebSocket with invocationId "0" (per SignalR protocol).
+   * Session/conversation IDs are reused so M365 maintains server-side context.
+   */
+  chat(token: string, text: string, model: string = "m365-copilot", signal?: AbortSignal, opts?: ChatTurnOptions): Promise<CopilotStream> {
+    const isFirst = this._turnCount === 0;
+    this._turnCount++;
+    const wantImages = opts?.generateImages ?? false;
+    const images = opts?.images ?? [];
+
+    log.info(`Chat turn ${this._turnCount - 1}: model=${model}, isFirst=${isFirst}, text=${JSON.stringify(trunc(text, 200))}`);
+    recordTurn(); // the throttle-avoidance bucket counts what that line counts (turn-budget.ts)
+
+    const requestId = crypto.randomUUID();
+    const personal = isPersonalMode() ? readPersonalRecord() : null;
+    // The personal (consumer) token is an opaque JWE — there are no readable
+    // claims, and the personal URL builder does not need any (F98/F106). Decode
+    // only on the enterprise path, where oid/tid feed the socket URL.
+    const claims = personal ? null : decodeJwt(token);
+
+    // Resolve the tone ONCE and derive the connection's entitlement from the
+    // MODEL (not the tone alone). `scenario` is not cosmetic: the same
+    // `Claude_Sonnet` tone is Sonnet 4.6 on the default `OfficeWebIncludedCopilot`
+    // and Sonnet 5.5 on `OfficeWebPaidCopilot`, the same `Claude_Opus` tone Opus
+    // 4.8 (premium only) and Opus 5.5, and some tones (`Gpt_6_Reasoning`) serve on
+    // the paid one only.
+    // See getScenarioForModel / docs §5.
+    const tone = getToneForModel(model);
+    const { scenario, licenseType } = getScenarioForModel(model);
+    if (personal) {
+      const effScenario = process.env.M365_SCENARIO ?? personal.scenario;
+      const why = process.env.M365_SCENARIO ? " (personal, M365_SCENARIO override)" : " (personal)";
+      log.info(`Routing: tone=${tone}, scenario=${effScenario}, licenseType=${personal.licenseType}${why}`);
+    } else {
+      log.info(`Routing: tone=${tone}, scenario=${scenario}, licenseType=${licenseType}`);
+    }
+
+    const params = personal
+      ? personalTurnParams(personal, {
+          requestId,
+          sessionId: this.sessionId,
+          conversationId: this.conversationId,
+        })
+      : new URLSearchParams({
+        chatsessionid: requestId,
+        clientrequestid: requestId,
+        "X-SessionId": this.sessionId,
+        ConversationId: this.conversationId,
+        access_token: token,
+        variants: VARIANTS,
+        source: '"officeweb"',
+        product: "Office",
+        agentHost: "Bizchat.FullScreen",
+        licenseType,
+        agent: "web",
+        scenario,
+      });
+
+    if (this.temporaryChat) params.set("disableMemory", "1");
+
+    const wsUrl = personal
+      ? buildPersonalChathubUrl(personal, params)
+      : buildCopilotWebSocketUrl(claims!.oid, claims!.tid, params);
+    const agentId = this.agentId;
+    const sessionId = this.sessionId;
+    const conversationId = this.conversationId;
+    const nativeActions = this.nativeActions;
+
+    return new Promise((resolve, reject) => {
+      // The authoritative reconstructed answer. M365 streams a MIX of token-level
+      // DeltaUpdates and full-text MessageUpdate snapshots (empirically the FIRST
+      // token often arrives only as a snapshot, not a delta), across one or more
+      // bot MESSAGES per turn — so text is assembled per message (`composer`) and
+      // the composed whole folded into this string. See `advance`.
+      let answer = "";
+      const composer = new TurnTextComposer();
+      let receivedContent = false;
+      let throttleInfo: { current: number; max: number } | null = null;
+      let contentOrigin: string | null = null;
+      let messageType: string | null = null;
+      let messageId: string | null = null;
+      // Highest per-component score across all messages this turn. The most
+      // recent score isn't necessarily the most informative — the worst one is.
+      const maxScores: Record<string, number> = {};
+      let turnCountServer: number | null = null;
+      let turnState: string | null = null;
+      // The final type:2 item's `result` — `{value: "Success"}` normally, and
+      // `{value: "Throttled", errorCode: "PerUserThrottled", message}` when the
+      // account is rate-limited: the turn then carries NO content frames, only a
+      // BotConnection apology inside that item (#35).
+      let serverResult: { value: string; errorCode?: string; message?: string } | null = null;
+      // The final item's `throttling.metering` (priority-access allowances, §24 F55).
+      let metering: Record<string, number> | null = null;
+      // Generated images captured this turn (§14). Keyed by fileToken so the
+      // repeated progress snapshots for one image collapse to a single entry.
+      const imagesByToken = new Map<string, CapturedImage>();
+      // Native-action round-trip state (H-NATIVE-6). `baseArgs` is the sent chat
+      // envelope's arguments[0], reused verbatim (minus `message`) to resume an
+      // action. `sawAction` records that the model triggered a custom action this
+      // turn; `actionResumed` guards against double-resuming the same trigger.
+      let baseArgs: Record<string, unknown> | null = null;
+      let sawAction = false;
+      let actionResumed = false;
+
+      // Delta pump. The queue/state live at Promise scope (NOT inside the
+      // asyncIterator factory) so deltas that arrive between `resolve(stream)` and
+      // the consumer starting to iterate are buffered instead of dropped — the
+      // early-token loss that made true incremental streaming lossy. onDelta/onDone/
+      // onError are wired once here, so they never depend on iteration having begun.
+      const queue: string[] = [];
+      let streamDone = false;
+      let streamError: Error | null = null;
+      let waiting: {
+        resolve: (result: IteratorResult<string>) => void;
+        reject: (err: Error) => void;
+      } | null = null;
+
+      const onDelta = (text: string) => {
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.resolve({ value: text, done: false });
+        } else {
+          queue.push(text);
+        }
+      };
+      const onDone = () => {
+        streamDone = true;
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.resolve({ value: undefined as any, done: true });
+        }
+      };
+      const onError = (err: Error) => {
+        streamError = err;
+        streamDone = true;
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.reject(err);
+        }
+      };
+
+      // Pull any generated images off a bot message. The GraphicArt frame arrives
+      // repeatedly as a Progress snapshot (status climbs to 2 = ready) and again in
+      // the final type:2 item, so we upsert by fileToken and keep the readiest copy.
+      const captureImages = (m: any) => {
+        const list = m?.contentGenerationProgressList;
+        if (!Array.isArray(list)) return;
+        for (const entry of list) {
+          const urls = entry?.ImageReferenceUrls;
+          if (!Array.isArray(urls) || urls.length === 0) continue;
+          const key = entry.fileToken ?? urls[0];
+          const prev = imagesByToken.get(key);
+          if (prev && (prev.status ?? 0) >= (entry.status ?? 0)) continue;
+          imagesByToken.set(key, {
+            referenceUrls: urls,
+            fileToken: entry.fileToken,
+            pollUrl: entry.pollUrl,
+            size: entry.size,
+            orientation: entry.orientation,
+            status: entry.status,
+          });
+        }
+      };
+
+      // Fold a token delta OR a full-text snapshot into `answer` and stream the
+      // newly-appended suffix (see foldStreamText for the prefix-safe rules).
+      const advance = (next: string) => {
+        const r = foldStreamText(answer, next);
+        if (r.answer !== answer) {
+          answer = r.answer;
+          receivedContent = true;
+        }
+        if (r.emit) onDelta(r.emit);
+      };
+
+      const stream: CopilotStream = {
+        get fullText() {
+          return answer;
+        },
+        get hasContent() {
+          return receivedContent;
+        },
+        get throttle() {
+          return throttleInfo;
+        },
+        get contentOrigin() {
+          return contentOrigin;
+        },
+        get messageType() {
+          return messageType;
+        },
+        get messageId() {
+          return messageId;
+        },
+        get scores() {
+          return Object.keys(maxScores).length ? { ...maxScores } : null;
+        },
+        get turnCount() {
+          return turnCountServer;
+        },
+        get turnState() {
+          return turnState;
+        },
+        get result() {
+          return serverResult;
+        },
+        get metering() {
+          return metering;
+        },
+        get images() {
+          return [...imagesByToken.values()];
+        },
+        get sawAction() {
+          return sawAction;
+        },
+
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<string>> {
+              // Drain buffered deltas BEFORE surfacing done/error, so a fast turn
+              // that finished before iteration began still yields all its text.
+              if (queue.length > 0) {
+                return Promise.resolve({ value: queue.shift()!, done: false });
+              }
+              if (streamError) return Promise.reject(streamError);
+              if (streamDone) {
+                return Promise.resolve({ value: undefined as any, done: true });
+              }
+              return new Promise((res, rej) => {
+                waiting = { resolve: res, reject: rej };
+              });
+            },
+          };
+        },
+      };
+
+      const ws = new WebSocket(wsUrl, {
+        headers: personal
+          ? buildPersonalWebSocketHeaders(conversationId)
+          : buildCopilotWebSocketHeaders(conversationId),
+      });
+
+      let handshakeDone = false;
+      let stopped = false;
+
+      // Cancellation: when the caller's signal aborts (HTTP client disconnected),
+      // cancel the in-flight M365 turn the same way the real UI does — send the
+      // Stop frame, then let the server's type:3 ack close the socket (with a
+      // hard-close fallback). Before the handshake completes there's nothing to
+      // stop, so just close.
+      const onAbort = () => {
+        if (stopped) return;
+        stopped = true;
+        try {
+          if (ws.readyState === WebSocket.OPEN && handshakeDone) {
+            log.info("Aborted — sending Stop frame to cancel the turn");
+            dumpFrame(requestId, { target: "stop", type: 1 }, "send");
+            ws.send(STOP_FRAME);
+            setTimeout(() => { try { ws.close(); } catch {} }, 2_000);
+          } else {
+            try { ws.close(); } catch {}
+          }
+        } catch {
+          try { ws.close(); } catch {}
+        }
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+      const clearAbort = () => signal?.removeEventListener("abort", onAbort);
+
+      ws.on("open", () => {
+        log.debug("WS connected, sending handshake");
+        ws.send(JSON.stringify({ protocol: "json", version: 1 }) + RS);
+      });
+
+      ws.on("message", (data: WebSocket.RawData) => {
+        const raw = data.toString();
+        log.debug("WS recv:", trunc(raw, 500));
+        const frames = raw.split(RS).filter((f) => f.length > 0);
+
+        for (const frame of frames) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(frame);
+          } catch {
+            if (!handshakeDone) {
+              handshakeDone = true;
+              sendChat();
+            }
+            continue;
+          }
+          dumpFrame(requestId, parsed, "recv");
+
+          if (!handshakeDone) {
+            handshakeDone = true;
+            const hs = SignalRHandshakeResponse.safeParse(parsed);
+            if (hs.success && hs.data.error) {
+              ws.close();
+              reject(new Error(`Handshake error: ${hs.data.error}`));
+              return;
+            }
+            sendChat();
+            continue;
+          }
+
+          handleMsg(parsed);
+        }
+      });
+
+      ws.on("error", (err: Error) => {
+        const msg = err.message || "connection failed";
+        log.error("WS error:", msg);
+        if (!handshakeDone) {
+          reject(new Error(`WebSocket error: ${msg}`));
+        } else {
+          onError(new Error(`WebSocket error: ${msg}`));
+        }
+      });
+
+      ws.on("close", () => {
+        clearAbort();
+        log.info("WS closed, answer length:", answer.length);
+        log.debug("Final response:", trunc(answer, 1000));
+        onDone();
+      });
+
+      const sendChat = () => {
+        const args = {
+              source: "officeweb",
+              clientCorrelationId: requestId,
+              sessionId,
+              // Code interpreter on the agent-less path only (see const above).
+              // M365_EXTRA_OPTIONSSETS (comma-sep) merges in on ANY path — used to
+              // test whether matching the official GUI's rich optionsSets stops the
+              // agent-path "replace X→Y" Disengage (F17/F21). The GUI sends a rich
+              // set + NO agent; we send [] + agent and Disengage.
+              optionsSets: [
+                ...(personal ? personal.optionsSets : []),
+                // Code interpreter on the agent-less path only; in personal
+                // mode the sandbox stays off except on an explicit override
+                // (spec §10.4). M365_NO_CODE_INTERPRETER still vetoes ANY path.
+                ...((shouldSendCodeInterpreter(agentId) && !process.env.M365_NO_CODE_INTERPRETER)
+                  ? CODE_INTERPRETER_OPTIONS_SETS
+                  : []),
+                ...(wantImages ? IMAGE_GEN_OPTIONS_SETS : []),
+                ...(process.env.M365_EXTRA_OPTIONSSETS ? process.env.M365_EXTRA_OPTIONSSETS.split(",").map((s) => s.trim()).filter(Boolean) : []),
+              ],
+              streamingMode: "ConciseWithPadding",
+              spokenTextMode: "None",
+              options: {},
+              extraExtensionParameters: {},
+              allowedMessageTypes: personal
+                ? dedupeKeepOrder([
+                    ...personal.allowedMessageTypes,
+                    // Image generation (§14): the server only SENDS the GraphicArt
+                    // frame if the client declares it can handle it — same
+                    // declare-to-receive rule as native actions.
+                    ...(wantImages ? ["GenerateGraphicArt"] : []),
+                    // Native custom-action vocabulary (H-NATIVE-6): the server only
+                    // SENDS these trigger frames if the client says it can handle them.
+                    ...(nativeActions ? ACTION_ALLOWED_MESSAGE_TYPES : []),
+                  ])
+                : [
+                "Chat",
+                "Suggestion",
+                "InternalSearchQuery",
+                "Disengaged",
+                "InternalLoaderMessage",
+                "Progress",
+                "RenderCardRequest",
+                "SemanticSerp",
+                "GenerateContentQuery",
+                "SearchQuery",
+                "ConfirmationCard",
+                "DeveloperLogs",
+                "EndOfRequest",
+                "ReferencesListComplete",
+                "GeneratedCode",        // code-interpreter execution frames
+                // Image generation (§14): the server only SENDS the GraphicArt
+                // frame if the client declares it can handle it — same
+                // declare-to-receive rule as native actions.
+                ...(wantImages ? ["GenerateGraphicArt"] : []),
+                // Native custom-action vocabulary (H-NATIVE-6): the server only
+                // SENDS these trigger frames if the client says it can handle them.
+                ...(nativeActions ? ACTION_ALLOWED_MESSAGE_TYPES : []),
+              ],
+              sliceIds: [] as string[],
+              threadLevelGptId: agentId
+                ? { id: agentId, source: "MOS3" }
+                : {},
+              traceId: requestId,
+              isStartOfSession: isFirst,
+              clientInfo: {
+                clientPlatform: "mcmcopilot-web",
+                clientAppName: "Office",
+                clientEntrypoint: "mcmcopilot-officeweb",
+                clientSessionId: sessionId,
+                ...(personal
+                  ? {
+                      // The consumer client's extra descriptors (F108) — the
+                      // enterprise backend ignores extras, the consumer one is
+                      // stricter about which surface is speaking.
+                      ProductCategory: "Chat",
+                      productEntryPoint: "ChatPanel",
+                      clientPlatformVersion: "10",
+                    }
+                  : {}),
+                clientAppType: "Web",
+                deviceOS: personal ? "Windows" : "Linux",
+                deviceType: "Desktop",
+              },
+              message: {
+                author: "user",
+                inputMethod: "Keyboard",
+                text,
+                entityAnnotationTypes: [
+                  "People",
+                  "File",
+                  "Event",
+                  "Email",
+                  "TeamsMessage",
+                ],
+                requestId,
+                locationInfo: { timeZoneOffset: 1, timeZone: "Europe/Copenhagen" },
+                locale: "en-gb",
+                messageType: "Chat",
+                experienceType: "Default",
+                adaptiveCards: [] as any[],
+                clientPreferences: {},
+                ...(images.length ? { messageAnnotations: images } : {}),
+              },
+              ...(agentId
+                ? {
+                    gpts: [{
+                      id: agentId,
+                      source: "MOS3",
+                      version: "1.0.0",
+                      clientOverrides: {
+                        // The real capability channel (H8.2/H8.3/H8.7) — RegisteredPlugins,
+                        // ScenarioModels, CodeInterpreter, … ride here per the decompile.
+                        capabilities: nativeActions?.capabilities ?? [],
+                        "deepResearchModels@odata.type": "Collection(String)",
+                      },
+                    }],
+                  }
+                : {}),
+              // Inline agent definition — attach a custom action WITHOUT sideloading
+              // through Teams/Graph (H-NATIVE-7). Best-effort schema from the decompile;
+              // run with M365_DUMP_FRAMES=1 to see what the server accepts.
+              ...(nativeActions?.gptDefinitions ? { gptDefinitions: nativeActions.gptDefinitions } : {}),
+              // plugins[]: an explicit native-action list wins; otherwise Bing on the
+              // plain (agent-less) path only, exactly as before.
+              ...(nativeActions?.plugins
+                ? { plugins: nativeActions.plugins }
+                : (!agentId ? { plugins: [{ Id: "BingWebSearch", Source: "BuiltIn" }] } : {})),
+              // Skill flags that gate the action/confirmation flow — the real client
+              // sends these in the chat payload (bundle 8af68b68f4a2 destructure at
+              // :9373-9378 → payload :11111). Without them the server has no reason to
+              // run the confirmation-dialog / auto-invoke skills, so an attached action
+              // never triggers. Only sent on the native-action path.
+              ...(nativeActions
+                ? {
+                    enableConfirmationDialogSkill: true,
+                    enableAgentAutoInvoke: true,
+                    enableMsgExtAuthSkill: true,
+                    enablePPCAuthSkill: true,
+                  }
+                : {}),
+              isSbsSupported: true,
+              // Consumer (personal) accounts serve the default Copilot model only:
+              // asking for a Claude_Sonnet tone answers InternalError on an
+              // otherwise identical turn (F108, live A/B). The real client sends
+              // "Magic", capitalised.
+              tone: personal ? "Magic" : tone,
+              renderReferencesBehindEOS: true,
+              disconnectBehavior: "continue",
+        };
+        baseArgs = args;
+        const chatMsg = {
+          arguments: [args],
+          invocationId: "0",
+          target: "chat",
+          type: 4,
+        };
+
+        const metrics = {
+          arguments: [
+            {
+              Timestamps: {
+                ConnectionStart: new Date().toISOString(),
+                UserInputStart: new Date().toISOString(),
+                ConnectionEstablished: new Date().toISOString(),
+                UserInputSubmit: new Date().toISOString(),
+              },
+            },
+          ],
+          target: "Metrics",
+          type: 1,
+        };
+
+        const payload = JSON.stringify(chatMsg) + RS + JSON.stringify(metrics) + RS;
+        log.debug("WS send:", trunc(payload, 500));
+        dumpFrame(requestId, chatMsg, "send");
+        dumpFrame(requestId, metrics, "send");
+        ws.send(payload);
+        resolve(stream);
+      };
+
+      // When the model triggers a native custom action, the server sends a
+      // confirmation TRIGGER (an adaptive card) and waits for us to approve it on
+      // THIS socket. We reuse the exact chat envelope (baseArgs) with a
+      // ResumeInvokeAction message, so the server-side orchestrator makes the real
+      // outbound call (H-NATIVE-6). Returns true if it sent a resume (⇒ keep socket
+      // open for the result). No-op unless native actions are enabled.
+      const maybeResumeAction = (m: unknown): boolean => {
+        if (!nativeActions || actionResumed || !baseArgs) return false;
+        const conf = parseActionConfirmation(m as any);
+        if (!conf) return false;
+        sawAction = true;
+        if (!shouldAutoConfirm(conf, { autoConfirmAll: nativeActions.autoConfirmAll })) {
+          log.info(`Native action ${conf.actionId} is consequential; autoConfirmAll off — not resuming`);
+          return false;
+        }
+        actionResumed = true;
+        const resumeArgs = { ...baseArgs, message: buildResumeInvokeAction(conf) };
+        const frame = { arguments: [resumeArgs], invocationId: "0", target: "chat", type: 4 };
+        dumpFrame(requestId, frame, "send");
+        log.info(`Native action: auto-confirming actionId=${conf.actionId} via ResumeInvokeAction`);
+        try { ws.send(JSON.stringify(frame) + RS); } catch (e) { log.error("resume send failed:", (e as Error).message); }
+        return true;
+      };
+
+      function handleMsg(raw: unknown) {
+        const base = raw as { type?: number; target?: string; arguments?: unknown[] };
+
+        if (base.type === 6) {
+          ws.send(JSON.stringify({ type: 6 }) + RS);
+          return;
+        }
+
+        if (base.type === 7) {
+          const frame = CloseFrame.safeParse(raw);
+          if (frame.success && frame.data.error) {
+            onError(new Error(`Server close: ${frame.data.error}`));
+          }
+          ws.close();
+          return;
+        }
+
+        if (base.type === 3) {
+          const frame = CompletionFrame.safeParse(raw);
+          if (frame.success && frame.data.error) {
+            onError(new Error(`Completion error: ${frame.data.error}`));
+          }
+          ws.close();
+          return;
+        }
+
+        if (base.type === 2) {
+          // Stream item — the FINAL state of the conversation, with authoritative
+          // throttle/turnCount/scores. Mine it before closing.
+          const item = (raw as { item?: { messages?: any[]; throttling?: any; turnState?: string; result?: { value?: unknown; errorCode?: unknown; message?: unknown } } }).item;
+          if (item) {
+            if (typeof item.result?.value === "string") {
+              serverResult = {
+                value: item.result.value,
+                ...(typeof item.result.errorCode === "string" ? { errorCode: item.result.errorCode } : {}),
+                ...(typeof item.result.message === "string" ? { message: item.result.message } : {}),
+              };
+              if (item.result.value !== "Success") log.info(`Turn result: ${item.result.value}${serverResult.errorCode ? ` (${serverResult.errorCode})` : ""}`);
+              if (item.result.value === "Throttled") recordThrottle();
+            }
+            if (item.turnState) turnState = item.turnState;
+            if (item.throttling) {
+              throttleInfo = { current: item.throttling.numUserMessagesInConversation, max: item.throttling.maxNumUserMessagesInConversation };
+              metering = parseMetering(item.throttling.metering);
+              for (const [budget, { label }] of Object.entries(METERED_BUDGETS)) {
+                const left = meteredAllowance(metering, budget as MeteredBudget);
+                if (left) log.info(`${label} priority access left: ${left.daily ?? "?"} today, ${left.weekly ?? "?"} this week`);
+              }
+            }
+            let resumedHere = false;
+            for (const m of item.messages ?? []) {
+              if (m.author !== "bot") continue;
+              captureImages(m);
+              if (m.contentOrigin) contentOrigin = m.contentOrigin;
+              if (m.messageType) messageType = m.messageType;
+              if (m.messageId) messageId = m.messageId;
+              if (typeof m.turnCount === "number") turnCountServer = m.turnCount;
+              if (Array.isArray(m.scores)) {
+                for (const s of m.scores) {
+                  if (typeof s?.component !== "string" || typeof s?.score !== "number") continue;
+                  if (!(s.component in maxScores) || s.score > maxScores[s.component]) {
+                    maxScores[s.component] = s.score;
+                  }
+                }
+              }
+              if (maybeResumeAction(m)) resumedHere = true;
+            }
+            // If the model just triggered a custom action, this "final" item isn't
+            // final — we sent a ResumeInvokeAction and must keep the socket open to
+            // receive the action's result (H-NATIVE-6).
+            if (resumedHere) return;
+          }
+          ws.close();
+          return;
+        }
+
+        if (base.type === 1 && base.target === "update" && Array.isArray(base.arguments)) {
+          for (const arg of base.arguments) {
+            const delta = DeltaUpdate.safeParse(arg);
+            if (delta.success) {
+              composer.delta(delta.data.writeAtCursor);
+              advance(composer.text);
+              continue;
+            }
+
+            const msgUpdate = MessageUpdate.safeParse(arg);
+            if (msgUpdate.success) {
+              // A cursor names the message that the following deltas extend.
+              const cursorId = cursorMessageId(msgUpdate.data.cursor?.j);
+              if (cursorId) composer.cursor(cursorId);
+              for (const m of msgUpdate.data.messages) {
+                // Capture diagnostic meta from every bot message — including the
+                // control-typed ones — so callers can tell apart `DeepLeo` from
+                // `3PDeclarativeAgent` and surface `Disengaged` cleanly.
+                if (m.author === "bot") {
+                  captureImages(m);
+                  if (m.contentOrigin) contentOrigin = m.contentOrigin;
+                  if (m.messageType) messageType = m.messageType;
+                  if (m.messageId) messageId = m.messageId;
+                  if (m.scores) {
+                    for (const s of m.scores) {
+                      if (!(s.component in maxScores) || s.score > maxScores[s.component]) {
+                        maxScores[s.component] = s.score;
+                      }
+                    }
+                  }
+                  if (typeof m.turnCount === "number") turnCountServer = m.turnCount;
+                  if (m.turnState) turnState = m.turnState;
+                  // A confirmation TRIGGER for a native action arrives here as a
+                  // messageType'd bot frame (which the plain-chat path drops). Detect
+                  // it and auto-approve on the same socket (H-NATIVE-6).
+                  maybeResumeAction(m);
+                }
+                if (m.author === "bot" && m.text && !m.messageType) {
+                  composer.snapshot(m.messageId, m.text);
+                  advance(composer.text);
+                }
+              }
+              continue;
+            }
+
+            const throttle = ThrottlingUpdate.safeParse(arg);
+            if (throttle.success) {
+              const t = throttle.data.throttling;
+              throttleInfo = { current: t.numUserMessagesInConversation, max: t.maxNumUserMessagesInConversation };
+              log.info(`Throttle: ${t.numUserMessagesInConversation}/${t.maxNumUserMessagesInConversation} messages`);
+            }
+          }
+        }
+      }
+    });
+  }
+}
+
+function dedupeKeepOrder(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+/** The login-time capability probe (spec §10.1): one live turn per candidate
+ *  model over the captured connection, "reply with the single word ok".
+ *  Returns the first model that produced bot text, or the last candidate with
+ *  `ok: false`. Live service only — no unit test; the CLI's probe dep routes
+ *  here (Task 3). */
+export async function probePersonalCapture(
+  capture: PersonalCapture,
+  models: string[],
+): Promise<{ model: string; ok: boolean; at: number }> {
+  for (const model of models) {
+    log.info(`personal capability probe: trying ${model}`);
+    const ok = await probeModel(capture, model);
+    if (ok) return { model, ok: true, at: Date.now() };
+  }
+  return { model: models[0]!, ok: false, at: Date.now() };
+}
+
+const PROBE_TIMEOUT_MS = 30_000;
+
+async function probeModel(capture: PersonalCapture, model: string): Promise<boolean> {
+  const requestId = crypto.randomUUID();
+  const params = personalTurnParams(capture, {
+    requestId,
+    sessionId: crypto.randomUUID(),
+    conversationId: crypto.randomUUID(),
+  });
+  const wsUrl = buildPersonalChathubUrl(capture, params);
+  return new Promise((resolve) => {
+    const ws = new WebSocket(wsUrl, { headers: buildPersonalWebSocketHeaders(params.get("ConversationId")!) });
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      if (ws.readyState !== WebSocket.CLOSED) ws.close();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), PROBE_TIMEOUT_MS);
+    let handshakeDone = false;
+
+    // The server waits for OUR handshake before it says anything; sending it only
+    // on the first inbound message deadlocks (F104 — observed as a silent 16 s
+    // probe timeout while the same socket answered fine with an on-open handshake).
+    ws.on("open", () => ws.send(JSON.stringify({ protocol: "json", version: 1 }) + RS));
+    ws.on("error", (err) => {
+      log.debug(`probe error for ${model}: ${err.message}`);
+      done(false);
+    });
+    ws.on("close", () => done(false));
+    ws.on("message", (data: WebSocket.RawData) => {
+      for (const line of data.toString().split(RS)) {
+        if (!line) continue;
+        let parsed: any;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!handshakeDone) {
+          handshakeDone = true;
+          ws.send(
+            JSON.stringify({
+              arguments: [{
+                source: capture.source,
+                clientCorrelationId: requestId,
+                sessionId: params.get("X-SessionId")!,
+                optionsSets: capture.optionsSets,
+                streamingMode: "ConciseWithPadding",
+                spokenTextMode: "None",
+                options: {},
+                extraExtensionParameters: {},
+                allowedMessageTypes: capture.allowedMessageTypes,
+                sliceIds: [] as string[],
+                threadLevelGptId: {},
+                traceId: requestId,
+                isStartOfSession: true,
+                clientInfo: {
+                  clientPlatform: "mcmcopilot-web",
+                  clientAppName: "Office",
+                  clientEntrypoint: "mcmcopilot-officeweb",
+                  clientSessionId: params.get("X-SessionId")!,
+                  clientAppType: "Web",
+                  deviceOS: "Linux",
+                  deviceType: "Desktop",
+                },
+                message: {
+                  author: "user",
+                  inputMethod: "Keyboard",
+                  text: "reply with the single word ok",
+                  entityType: 0,
+                },
+                // The capability probe only ever runs against a personal capture,
+                // and the consumer backend serves the default Copilot model only:
+                // a Claude_Sonnet tone answers InternalError on an otherwise
+                // identical turn (F108). The real client sends "Magic" capitalised.
+                tone: "Magic",
+              }],
+              invocationId: "0",
+              target: "chat",
+              type: 4,
+            }) + RS,
+          );
+          continue;
+        }
+        const messages = parsed?.item?.messages ?? parsed?.arguments?.[0]?.messages;
+        if (Array.isArray(messages)) {
+          const botText = messages.some(
+            (m: any) =>
+              m.author === "bot" &&
+              typeof m.text === "string" &&
+              m.text.trim() !== "",
+          );
+          if (botText) done(true);
+        }
+      }
+    });
+  });
+}

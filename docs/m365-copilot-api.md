@@ -1,0 +1,703 @@
+# The M365 Copilot API — field notes from reverse engineering
+
+Microsoft 365 Copilot (the "BizChat" / "Office web" Copilot, **not** the public
+Azure OpenAI API) has no documented developer API. It is a **SignalR-over-WebSocket**
+service intended to be driven only by Microsoft's own first-party web/desktop clients.
+This document records everything we learned wiring it up as an OpenAI-compatible
+backend, so the next person (or agent) doesn't have to rediscover it.
+
+Everything here is observed behaviour as of **June 2026**, against the
+`substrate.office.com` Sydney backend. Microsoft can change any of it without notice.
+
+> Source of truth in this repo: `packages/core/src/{auth,copilot,session,agent,schemas}.ts`.
+
+---
+
+## 0. TL;DR — the weird parts
+
+If you read nothing else:
+
+1. It's **SignalR over WebSocket** to `wss://substrate.office.com/m365Copilot/Chathub/{oid}@{tid}`, framed with `0x1E` record separators. **Not** HTTP, not OpenAI.
+2. The **access token goes in the WebSocket URL query string** (`access_token=...`), not a header.
+3. **Node's native `fetch`/`WebSocket` do not work** — you must use the `ws` npm package and send a real browser `Origin` + `User-Agent`, or the server refuses.
+4. A **`Metrics` frame must be sent in the same WS payload** as the chat message, or the turn never starts.
+5. The **model is selected by a `tone` string** (`magic`, `Gpt_5_4_Reasoning`, …), not a model ID.
+6. Auth uses **MSAL PKCE with the `nativeclient` redirect**, which a real browser bounces to `/common/wrongplace` — you must scrape the auth code from the *navigation request*, not wait for the redirect to land.
+7. **Tool calling is not native.** It only works reliably if you create a **Copilot Studio agent** and reference it per request; otherwise M365 ignores tool instructions and answers in prose / hallucinates.
+8. M365 has a **"Disengaged" safety filter**: large or jailbreak-looking prompts get a `messageType:"Disengaged"` message with **empty content** — which is easy to mistake for rate limiting.
+
+---
+
+## 1. The endpoint
+
+```
+wss://substrate.office.com/m365Copilot/Chathub/{oid}@{tid}?{query}
+```
+
+- `{oid}` and `{tid}` are the **object id** and **tenant id** from the JWT (`oid`/`tid` claims). Decode the token to get them — see `decodeJwt()` in `copilot.ts`.
+- The query string carries session identifiers, feature flags, **and the access token**:
+
+| Param | Value / notes |
+|---|---|
+| `access_token` | The full Sydney JWT (see §2). Yes, in the URL. |
+| `ConversationId` | A UUID you generate; reused across turns to keep server-side context. |
+| `chatsessionid` / `clientrequestid` / `X-SessionId` | UUIDs (per-request and per-session). |
+| `source` | `"officeweb"` (note: the literal value is double-quoted in the original client). |
+| `product` | `Office` |
+| `agentHost` | `Bizchat.FullScreen` |
+| `licenseType` | `Starter`, or `Premium` alongside the paid scenario. Not a model lever on its own (§5). |
+| `scenario` | `OfficeWebIncludedCopilot`, or `OfficeWebPaidCopilot` for Opus — **this is what gates the model list** (§5). |
+| `variants` | A long comma-separated list of feature flags (see `VARIANTS` in `copilot.ts`). Most are cargo-culted from a captured session; removing them is untested. |
+
+---
+
+## 2. Authentication
+
+### Client and scopes
+- **Client ID:** `c0ab8ce9-e9a0-42e7-b064-33d422df41f1` (a Microsoft first-party app id — *we did not register this*; it's the Office web Copilot client).
+- **Work or school accounts only (enterprise path).** The client rejects a personal Microsoft account at the username step ("You can't sign in here with a personal account", #64). Consumer Copilot (M365 Personal/Family, copilot.microsoft.com) has its own path entirely: the **personal path** ([`docs/personal-auth.md`](personal-auth.md)) instead captures the web app's own session and replays its captured parameters — same Chathub host under `scenario=OfficeWebPaidConsumerCopilot` with an `access_token` taken from `m365.cloud.microsoft/chat`. **This is unverified against a live personal account** — it is a captured-shape claim, not a measured one, and §5's tone/scenario facts were all measured on the enterprise scenarios. The reason this can work: `substrate.office.com/m365Copilot` is the same front end the copilot.cloud.microsoft web app itself talks to, whatever credentials it carries.
+- **Authority:** `https://login.microsoftonline.com/common`
+- **Redirect URI:** `https://login.microsoftonline.com/common/oauth2/nativeclient`
+- **Chat scopes:**
+  - `https://substrate.office.com/sydney/M365Chat.Read`
+  - `https://substrate.office.com/sydney/sydney.readwrite`
+- The resulting token has **audience `https://substrate.office.com/sydney`** and is ~3500 chars.
+- **Agent management needs two more scopes** (separate silent/interactive acquisitions):
+  - `https://api.powerplatform.com/.default` (Copilot Studio)
+  - `https://api.bap.microsoft.com/.default` (environment discovery)
+
+### Flow: MSAL PKCE
+We use `@azure/msal-node` `PublicClientApplication` with PKCE. The token cache is persisted to `~/.config/opencode-m365/msal-cache.json` and refreshed silently when possible.
+
+> **The cache is disposable (tested June 2026, `scripts/token-regen-probe.mjs`).** Delete `msal-cache.json` and the next `getToken()` self-heals: silent fails → automated browser login (stored creds + TOTP) → a fresh, working token in **~12s**, no human in the loop. The regenerated token is **functionally identical** — same `aud`/`appid`/`tid`/`oid`/scopes, only `iat`/`exp`/`uti` change. Point auth at a throwaway cache with `M365_CACHE_FILE` to test this without touching the real one.
+>
+> **Re-auth does NOT clear account throttling** — the fresh token carries the same `oid`, so it lands in the same account-keyed throttle bucket. Throttling is identity-level, not token-level.
+>
+> **Observed token scopes** (the Sydney token already carries these): `CopilotPlatform{Content.Process,Files.ReadWrite(All),Mail.Read(.Shared),Presence.Read(.All),Sites.Read.All,Teams.ReadWrite.All,User.Read,License...,ProtectionScopes...,DataLossPrevention...}` + `M365Chat.Read` + `sydney.readwrite`. So the auth we hold already has the entitlements behind Files/Mail/Sites/Teams/Presence — the foundation for any Graph "Work" grounding (hypotheses §8 H8.11).
+
+### The `nativeclient` redirect gotcha (this one cost hours)
+The `nativeclient` redirect URI is designed to be **intercepted by an embedded native host** (WebView2 etc.) *before the page loads*. A real browser instead follows the redirect one hop further and lands on **`https://login.microsoftonline.com/common/wrongplace`** ("This is not the right page"). So:
+
+- `page.waitForURL("**/oauth2/nativeclient**")` **misses** the auth code — the `?code=` URL exists only transiently before the bounce.
+- **Fix:** attach a `page.on("request")` listener and pull `code` out of the *navigation request* to `…/oauth2/nativeclient?code=…`. See `runBrowserLogin()` in `auth.ts`.
+
+### Automated login quirks (Playwright)
+- The converged AAD login page keeps **hidden duplicate `<input type=password>` nodes**; a naive `fill()` can target a stale hidden one and submit an empty password. Fill the **visible** `name=`-selected field and verify the value landed (`fillVerified()`).
+- Field selectors: email `input[name="loginfmt"]`, password `input[name="passwd"]`, TOTP `input[name="otc"]`.
+- On NixOS, Playwright's bundled `chrome-headless-shell` fails (`libglib-2.0.so.0`); point it at a system Chromium via `CHROMIUM_PATH` (`resolveChromiumPath()`).
+- TOTP codes are single-use per 30s window — space retries past the window.
+
+---
+
+## 3. Transport: SignalR over WebSocket
+
+### Required headers
+The `ws` client must send browser-like headers or the upgrade is rejected:
+```
+Origin: https://m365.cloud.microsoft
+User-Agent: Mozilla/5.0 (… Firefox/148.0)
+```
+Node's built-in `WebSocket` doesn't let you set these the same way and **does not work** — use the `ws` npm package.
+
+### Framing
+SignalR JSON protocol. **Every frame is terminated by a `0x1E` (RS, record separator) byte.** A single WS message can contain multiple `0x1E`-separated frames; split on `0x1E` and parse each non-empty chunk.
+
+### Handshake
+On open, send:
+```
+{"protocol":"json","version":1}\x1E
+```
+The server replies with `{}` (empty handshake-OK) — sometimes as an empty object, sometimes the first parse just succeeds. After that, send the chat turn.
+
+### Frame types (the `type` field)
+| `type` | Meaning |
+|---|---|
+| `1` | **Invocation / update.** Server→client streaming updates use `target:"update"`. Client→server `Metrics` also uses type 1. |
+| `2` | **Stream item** — emitted at the end with the final conversation item; we treat it as "close". |
+| `3` | **Completion** — has an optional `error`. |
+| `4` | **Invocation (no-result)** — this is what we **send** for the chat turn (`target:"chat"`). |
+| `6` | **Ping** — reply with `{"type":6}\x1E` to keep alive. |
+| `7` | **Close** — optional `error`. |
+
+See `handleMsg()` in `session.ts` for the dispatch.
+
+---
+
+## 4. Sending a chat turn
+
+You send **two frames in one `ws.send()`**: the chat invocation **and** a `Metrics` frame. Omitting the Metrics frame causes the turn to silently never produce output.
+
+```
+<chat invocation JSON>\x1E<metrics JSON>\x1E
+```
+
+### The chat invocation (`type: 4`, `target: "chat"`, `invocationId: "0"`)
+Key fields inside `arguments[0]` (full shape in `session.ts::sendChat`):
+
+| Field | Notes |
+|---|---|
+| `message.text` | The actual prompt string. |
+| `message.author` | `"user"` |
+| `tone` | **Selects the model** — see §5. |
+| `source` | `"officeweb"` |
+| `streamingMode` | `"ConciseWithPadding"` |
+| `isStartOfSession` | `true` on the first turn of a conversation, `false` after. |
+| `allowedMessageTypes` | A long allow-list (`Chat`, `Suggestion`, `Progress`, `EndOfRequest`, …). |
+| `clientInfo` | `clientPlatform:"mcmcopilot-web"`, `clientAppName:"Office"`, etc. |
+| `plugins` | `[{Id:"BingWebSearch",Source:"BuiltIn"}]` **when no agent**. |
+| `threadLevelGptId` / `gpts` | Set **instead of** `plugins` when using a Copilot Studio agent (see §10). |
+| `locationInfo` / `locale` | The original client sends a real timezone/locale; values seem cosmetic. |
+
+`invocationId` is always `"0"` even across reconnects — each turn is a fresh WebSocket.
+
+### Images in a turn (vision)
+
+The web client uploads a pasted image first, then points the chat message at it:
+
+1. `POST https://substrate.office.com/m365Copilot/UploadFile`, form-encoded, with the chat token:
+   `scenario=UploadImage`, `conversationId=<the conversation's id>`, `FileBase64=data:image/png;base64,…`,
+   `optionsSets=cwcgptvsan`, `optionsSets=flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch`; headers
+   `X-Scenario: OfficeWebIncludedCopilot`, `X-Variants: feature.EnableImageSupportInUploadFile`, the
+   `m365.cloud.microsoft` Origin/Referer. The JSON reply carries a `docId`.
+2. The chat invocation's `message.messageAnnotations: [{ id: <docId>, messageAnnotationType: "ImageFile",
+   messageAnnotationMetadata: { "@type": "File", annotationType: "File", fileType: "png", fileName } }]`.
+
+Nothing else is needed: no GPT-V `optionsSets` on the turn, and it works with the tool agent attached
+(hypotheses §33 F86). `core/src/image-input.ts`; the handler sends the OpenAI `image_url` (data URL)
+parts of the messages a turn carries.
+
+### The mandatory Metrics frame (`type: 1`, `target: "Metrics"`)
+```json
+{
+  "arguments": [{ "Timestamps": {
+    "ConnectionStart": "<iso>", "UserInputStart": "<iso>",
+    "ConnectionEstablished": "<iso>", "UserInputSubmit": "<iso>"
+  }}],
+  "target": "Metrics",
+  "type": 1
+}
+```
+The timestamp values appear cosmetic, but the frame's **presence is required**.
+
+---
+
+## 5. Models are selected by `tone`, not model id
+
+There is no `model` parameter. The `tone` string on the chat message picks the model/mode:
+
+| Our model id | `tone` | Notes |
+|---|---|---|
+| `m365-copilot` / `auto` | `magic` (auto-routing) | default; routes GPT-5 class |
+| `quick` | `Gpt_5_5_Chat` | alias of `gpt-5.5`. Was `Gpt_Quick`, now rejected, and no unversioned chat tone survives (`Gpt_Chat` is rejected too) |
+| `think-deeper` | `Gpt_5_5_Reasoning` | alias of `gpt-5.5-think-deeper`. Was `Gpt_Reasoning`, now rejected |
+| `claude` / `claude-sonnet` / `claude-sonnet-4.6` | `Claude_Sonnet` | **real Anthropic Claude Sonnet 4.6** (self-identifies; it was 4.5 until Sep 2026 — `claude-sonnet-4.5` is kept as an alias) |
+| `claude-sonnet-5.5` | `Claude_Sonnet` **+ paid scenario** | **Claude Sonnet 5.5** (self-IDs "Claude Sonnet 5.5", often wrapped as "Microsoft Copilot (based on Claude Sonnet 5.5)", cutoff 2026-01; since 2026-10-06 — this route was Sonnet 5 before). Same tone as the row above: the scenario picks the model (see below). **Metered by priority access** (80/day, 150/week, below). Has Sonnet 5's server-side tools (`/home/claude`) — see "Claude Sonnet 5" below. Default framing `relay` (hypotheses §26) |
+| `claude-sonnet-5` | `Claude_Sonnet_5` **+ paid scenario** | **Claude Sonnet 5** (self-IDs "Claude Sonnet 5", cutoff 2026-01), on its own tone since 2026-10-06. Not metered. On the included scenario this tone serves Sonnet 4.6, like `Claude_Sonnet`. Has its own server-side tools — see "Claude Sonnet 5" below |
+| `claude-sonnet-think-deeper` | `Claude_Sonnet_Reasoning` | Claude Sonnet + reasoning (included scenario; not re-identified since 4.5) |
+| `claude-opus` / `claude-opus-5.5` / `claude-opus-5` | `Claude_Opus` **+ paid scenario** | **real Opus — Claude Opus 5.5** (self-IDs "Claude Opus 5.5", cutoff 2026-06, since at least 2026-10-01; it was Opus 5, cutoff 2026-05, in September — `claude-opus-5` is kept as an alias). Reachable ONLY under `scenario=OfficeWebPaidCopilot` (see below). Metered by priority access (below). Tool requests carry the tool agent, with the `relay_batch` framing (hypotheses §24) |
+| `claude-opus-4.8` / `claude-opus-4.5` | `Claude_Opus` **+ included scenario** | **Claude Opus 4.8** (self-IDs "Claude Opus 4.8; Anthropic", cutoff 2026-01 or 2025-01, since 2026-10-11 at the latest; it was Claude Opus 4.5 before, and `claude-opus-4.5` is kept as an alias), premium accounts only, and **not** metered by priority access. Same tone as the row above: the scenario picks the model. Serves with the tool agent and without it on a premium account; on a non-premium one it is the "registered but dead" route either way, which the proxy reports as a 502 `model_route_unavailable`. Tool requests carry the agent: agent-less it has its own code interpreter and, under a framing that doesn't steer it out (`baseline`), works there instead of in the harness (1/10 vs 8/10 with the agent); under `relay_batch`, its default, the two paths tie (30/30 each, 2.60 vs 2.53 turns per task) (hypotheses §36). Tool-less requests go agent-less. Opus 4.5 served ONLY with the agent; its system prompt called it "Claude Opus 5", and it sometimes ended a tool fence with its native call markup (`</invoke>`, `</parameter>`, `</function_calls>`), which the parser strips (§24 F54, F57) |
+| `gpt-5.5` / `gpt-5.5-quick` | `Gpt_5_5_Chat` | current GPT generation |
+| `gpt-5.5-think-deeper` | `Gpt_5_5_Reasoning` | |
+| `gpt-5.6-think-deeper` | `Gpt_5_6_Reasoning` | confirmed live 2026-08-06; GPT-5.6 Think deeper |
+| `gpt-5.6` / `gpt-5.6-quick` | `Gpt_5_6_Chat` | "GPT 5.6 Quick response" in the web UI. Live on the **included** scenario since 2026-09-24 — it was entitlement-gated before that (§18), which §12.15 misread as dead |
+| `gpt-6-think-deeper` | `Gpt_6_Reasoning` | GPT-6 Think deeper. Reachable ONLY under `scenario=OfficeWebPaidCopilot` (see below), like Opus — but **not** separately metered. No chat variant: `Gpt_6_Chat` is rejected. Doesn't serve with the tool agent, so its tool requests go agent-less with a user-voice relay framing, `relay_batch` since hypotheses §25 (§22, #41) |
+| `gpt-6-sol` | `Gpt_6_Sol_Reasoning` | "GPT 6.0 Sol" in the web client (not called Think Deeper). Self-IDs as the GPT-6 reasoning model. **Not** gated: serves on the included scenario on every account. Takes the tool agent only on a **premium** account (non-premium: dead route), which the proxy learns at runtime; agent-less it has a sandbox of its own. Default framing `relay_batch` on both paths (hypotheses §23, §28, #23). `Gpt_6_Sol_Chat` is accepted but serves the GPT-5 chat model, so it isn't mapped |
+| `gpt-6.1-sol` | `Gpt_61_Sol_Reasoning` | "GPT-6.1 Sol" in the web client. Self-IDs as the GPT-6 reasoning model. Serves on the included scenario on every account; the paid scenario serves it too but spends the `GPT61Sol*` budget (40/day, 75/week), so the proxy stays on the included one. Like `gpt-6-sol`, it serves with the tool agent attached only on a **premium** account (non-premium: dead route, so the proxy goes agent-less there), and agent-less it has the same kind of sandbox, though unlike `gpt-6-sol` it stays out of it under the user-voice framings (hypotheses §29). Default framing `relay_batch` on both paths (hypotheses §27). Every sibling (`Gpt_61_Sol`, `Gpt_61_Sol_Chat`, `Gpt_61_Reasoning`, `Gpt_61_Chat`, `Gpt_61`) is rejected |
+| `gpt-5.4` / `gpt-5.4-think-deeper` | `Gpt_5_4_Reasoning` | |
+| `gpt-5.4-quick` | `Gpt_5_4_Chat` | was `Gpt_5_4_Quick` (retired) |
+| `gpt-5.3` / `gpt-5.3-quick` | `Gpt_5_3_Chat` | was `Gpt_5_3_Quick` (retired) |
+| `gpt-5.3-think-deeper` | `Gpt_5_3_Reasoning` | |
+| `gpt-5.2` / `gpt-5.2-quick` | `Gpt_5_2_Chat` | was `Gpt_5_2_Quick` (retired) |
+| `gpt-5.2-think-deeper` | `Gpt_5_2_Reasoning` | |
+
+Mapping lives in `MODEL_TONES` (`copilot.ts`). `*_Reasoning` tones take 10–30s.
+
+**The `*_Quick` tones are retired; the `*_Chat` tones replaced them** (2026-09-28, `tone-probe` n=3, hypotheses §19). `Gpt_Quick` and `Gpt_5_{2,3,4}_Quick` now fail validation exactly like the invalid-tone control, while `Gpt_5_{2,3,4}_Chat` serve (`DeepLeo`), so every generation from 5.2 to 5.6 is a `*_Chat` + `*_Reasoning` pair. The unversioned tones went too: `Gpt_Chat` and `Gpt_Reasoning` are also rejected, so the generic `quick` / `think-deeper` IDs pin to GPT-5.5. All the `-quick` model IDs are kept as aliases, so client configs don't change. Don't map a `*_Quick` tone.
+
+**The server validates `tone` — and there are THREE outcomes, not two** (Aug 6 2026, §12.15). Probe a candidate tone agent-less and read `contentOrigin`:
+
+| Outcome | Signal | Meaning |
+|---|---|---|
+| **Live** | content + `contentOrigin: "DeepLeo"`, seconds-to-30s | real, registered, serving — safe to map |
+| **Rejected** | `type:3` error `Failed to invoke 'Chat'`, ~250-300ms | no such tone |
+| **Registered but dead** | canned *"Sorry, I wasn't able to respond to that"* + `contentOrigin: "BotConnection"`, ~1.6s | route exists, serves nothing |
+
+That third state is the trap: **"didn't error" is not sufficient to conclude a tone works.** Require `DeepLeo` before mapping anything — a `BotConnection` reply in ~1.6s looks like a *fast* model, so neither "did it error?" nor a latency check catches it. `Claude_Opus` on the included scenario was the state's standing example until October 2026; it still is on a non-premium account, but a premium one now gets Opus 4.8 there (hypotheses §36).
+
+**But read "registered but dead" as a reading of one connection, not a verdict on the tone** — the state is frequently just an entitlement you haven't varied yet, and it can come good later. `Gpt_5_6_Chat` was the case study for the trap from August 2026 until it stopped being one: it deflected on `OfficeWebIncludedCopilot` while serving normally on `OfficeWebPaidCopilot` the entire time, and as of 2026-09-24 it serves on both. So it was never dead — first mis-scoped (the same shape as F23's "Opus is a dead tone": a variable held fixed without anyone noticing it was a variable), then un-gated. Before recording a tone as dead, probe it on **both** scenarios; before leaving it recorded that way, re-probe it. `scripts/tone-probe.mjs` pairs the entitlement-sensitive cells for exactly this reason.
+
+The GPT-6 rollout is a useful contrast on exactly this axis: `Gpt_6_Reasoning` is live (under the paid scenario), while `Gpt_6_Chat` is **rejected** — a validator error, not the BotConnection deflection `Gpt_5_6_Chat` used to give. Only one of those two survives a "did it error?" check, and the distinction turned out to predict what happened next: the deflecting tone was gated and later opened up, while the rejected one is simply absent. A `BotConnection` route is worth re-probing; a validator error is not.
+
+Rejected on test: `Anthropic_Claude`, `Claude_Haiku`, `Claude_3_7_Sonnet`, `Gpt_6_Chat`, and (since 2026-09-28) `Gpt_Quick`, `Gpt_Chat`, `Gpt_Reasoning`, `Gpt_5_{2,3,4}_Quick`. Accepted-but-NOT-Claude: `Claude_Reasoning` (self-IDs as GPT-5 — don't use). New tones still appear by pattern (`Gpt_5_N_{Chat,Reasoning}`, `Claude_*`).
+
+**`Claude_Fable` is a fourth shape: accepted, answers — and answers as something else.** It exists in the real web client's tone list (§12.6), it is accepted here, and it returns content. But it self-identifies as **GPT-5, not Fable**, so "it replied" once again proves only that *a* model answered. Best current reading: the Fable route is gated on the **Frontier program**, and an unentitled account is quietly served the house model instead of being rejected — the entitlement gate degrades silently where the tone validator would have errored. Unlike Opus, no scenario string is known to open it; program membership is not a query parameter. It is therefore deliberately **absent from `MODEL_TONES`** — mapping it would ship a model ID that lies about which model answers — and lives only in `scripts/tone-probe.mjs`, where a self-ID check can catch the day that changes.
+
+### Entitlement: `scenario` (and its `licenseType`) gate which models will serve
+
+The WS query carries `scenario` and `licenseType`. We sent `OfficeWebIncludedCopilot` + `Starter` unconditionally, which silently capped the model list:
+
+| `scenario` | `licenseType` | Serves |
+|---|---|---|
+| `OfficeWebIncludedCopilot` | `Starter` | everything in the table above **except** `Claude_Opus` and `Gpt_6_Reasoning`; `Claude_Sonnet` and `Claude_Sonnet_5` are both **Sonnet 4.6**. Exception to the exception: on a premium account `Claude_Opus` serves **Opus 4.8** here, with the tool agent or without it (until October 2026 it was **Opus 4.5**, with the agent only) |
+| `OfficeWebPaidCopilot` | `Premium` | the same, **plus `Claude_Opus` and `Gpt_6_Reasoning`** — and `Claude_Sonnet` becomes **Sonnet 5.5**, `Claude_Sonnet_5` **Sonnet 5**, `Claude_Opus` **Opus 5.5** |
+
+**A scenario can change which model a tone IS, not only whether it serves.** `Claude_Sonnet` is live on both scenarios, so a liveness probe (`contentOrigin: "DeepLeo"`) reads the same on each — only a self-ID prompt shows that the included route is Sonnet 4.6 and the paid one Sonnet 5.5 (Sonnet 5 until 2026-10-06; tone-probe ×3, 2026-09-28; tone-probe + agent-tone-probe, 2026-10-06, hypotheses §26). The tone table alone is therefore not enough to route: `claude-sonnet-5.5` differs from `claude-sonnet` only in its scenario, which is why routing is derived from the **model ID** (`getScenarioForModel`, via `PAID_SCENARIO_MODELS`), not the tone. `Claude_Sonnet_5` has the same split (Sonnet 4.6 included, Sonnet 5 paid), but since nothing maps it for 4.6 it simply sits in `PAID_SCENARIO_TONES`. `Claude_Opus` is the mirror image: a paid tone whose included route is a different model (Opus 4.8, premium accounts only), so `claude-opus-4.8` (and the legacy `claude-opus-4.5`) opts back into the included scenario (`INCLUDED_SCENARIO_MODELS`).
+
+**A tone's paid route can also be swapped for a newer model under the same name.** On 2026-10-06 `Claude_Sonnet` @ paid started answering as Sonnet 5.5 and Sonnet 5 moved to a new tone, `Claude_Sonnet_5`. Nothing on the wire announced it; the self-ID did, and so did a new pair of `metering` keys (below). So `claude-sonnet-5` now maps to `Claude_Sonnet_5`, and a pinned model ID is only as stable as the tone it maps to — re-run the self-ID probes when a new budget key appears.
+
+Two things worth separating, because conflating them wastes probes:
+
+- **`scenario` is the lever.** Flipping it to `OfficeWebPaidCopilot` is what makes `Claude_Opus` serve a real answer instead of the canned BotConnection apology. This also rewrites the old F23 reading of "Opus is a dead tone, 0/3": that measurement was taken on the included scenario, where the observation was correct and the conclusion wasn't. (On a premium account the included scenario has served a different model there since October 2026, Opus 4.8: hypotheses §36.)
+- **`licenseType` is not.** `Premium` is simply the value the paid scenario travels with; setting `licenseType` alone does **not** grant access to different models. We send the pair for coherence with the real client, not because both halves do work.
+
+This is an entitlement, not a bypass: the account has to actually hold the paid/premium access. On a seat that doesn't, the paid scenario is refused outright: the final item carries `result.value: "ForbiddenRequest"`, `errorCode: "InvalidCopilotLicense"`, and a BotConnection reply *"It looks like you don't have a valid licence. To get access, please check with your administrator…"* (~2.5 s). It is about the account, not the tone: `Gpt_5_6_Chat`, `Claude_Sonnet` and `Claude_Opus` were all refused this way (6/6 across two runs, agent attached, 2026-10-01; hypotheses §22 F46), and `Gpt_5_6_Chat` serves on the same account under the included scenario. One exception: with the agent attached, `Gpt_6_Reasoning` returns its dead-route `InternalError` instead (2/2), so an `InternalError` on the paid scenario doesn't prove the account is licensed. The licence refusal is a different wire state from the dead route's `InternalError` + "Sorry, I wasn't able to respond to that". The proxy has no handling for it yet.
+
+**The gate is not a budget.** Opus is both entitlement-gated *and* metered by priority access (below), and while it was the only paid-scenario tone those two properties were indistinguishable — it was easy to read "paid scenario" as shorthand for "scarce". `Gpt_6_Reasoning` separates them: same gate, no priority-access allowance, throttled by the ordinary per-conversation cap and thread-rate governor like everything else. Sonnet 5 (`Claude_Sonnet_5`) is the same, and Sonnet 5.5 (`Claude_Sonnet` @ paid) is metered like Opus. So membership of `PAID_SCENARIO_TONES` says what a tone needs to *reach* a model and nothing about what it costs once it does. Downstream code should not infer one from the other — the metered models are listed on their own (`meteredBudgetOf`), the priority-access detector keys on `OutOfCredits` (so it simply never fires for GPT-6), and the framing default is decided per model (`defaultFramingForModel`). Opus and GPT-6 both end up on user-voice relays, for unrelated reasons: on Opus the `<system>`-tagged framings trip the jailbreak classifier and its budget counts turns, hence `relay_batch` (hypotheses §24 F56, F60); GPT-6 runs agent-less, next to M365's code interpreter, hence a relay (§22 F47) — batched, as `relay_batch`, since it cut a third of its turns without sending it to that sandbox (§25 F61).
+
+Implemented in `getScenarioForModel()` (`copilot.ts`), applied per-turn in `session.ts` from the **model ID** — paid when the resolved tone is in `PAID_SCENARIO_TONES` (Opus, Sonnet 5, GPT-6) or the ID is in `PAID_SCENARIO_MODELS` (Sonnet 5.5, including unmapped `claude-sonnet-5.5…` / `claude-sonnet-5-5…` strings), included when the ID is in `INCLUDED_SCENARIO_MODELS` (Opus 4.8, including unmapped `claude-opus-4-8…` strings and the legacy `claude-opus-4-5…` ones) — so a request routes itself and no caller has to know the rule. `getScenarioForTone()` remains for tone-only callers. Override with `M365_SCENARIO` / `M365_LICENSE_TYPE` (independent, for a tenant whose entitlement is named differently).
+
+### Claude Sonnet 5 arrives with its own tools — and reads our framing as an injection
+
+Under the paid scenario `Claude_Sonnet_5` is Sonnet 5 (and, until 2026-10-06, so was `Claude_Sonnet`), and it comes with a **real function-calling toolset of its own**: `bash_tool`, `create_file`, `str_replace`, `view` (it names them in its reasoning), running in a **remote sandbox** — cwd `/home/claude`, uploads `/mnt/user-data/uploads`, outputs `/mnt/user-data/outputs` (shared back as Teams artifact links). On the wire they are `Progress` frames (§6). Nothing the client sends turns them off: `pwd` ran natively → `/home/claude` with the proxy's optionsSets, with **no** optionsSets, and with no plugins and minimal variants; with `Progress` undeclared the frames vanish but the answer is still `/home/claude` — `scripts/sonnet5-native-tools-probe.mjs`, n=1 per cell, hypotheses §21 F36. Sonnet 4.6 has no such toolset; its sandbox is the M365 code interpreter (§ below). **The tool agent does remove it** (premium only, where the agent route serves Claude): 0 sandbox frames in 51 Sonnet 5 agent turns, against 6 of 20 tasks agent-less — but the agent's enterprise fetch tools then sit in its context, and it refuses the harness instead (10/20 vs 19/20; hypotheses §30). **Sonnet 5.5 has it too:** the same probe with `TONE=Claude_Sonnet` ran `pwd` natively → `/home/claude` (2026-10-06, n=1, hypotheses §26).
+
+So a Sonnet 5 tool turn has two execution paths, and the wrong one looks right: the model inspects its own empty sandbox and reports, truthfully, that the task's files don't exist — or creates the file there and hands back a Teams link. What decides which path it takes is how our framing is **labelled**: a `<system>` block inside the user turn reads to Sonnet 5 as a forged system prompt, and its chain-of-thought summary says so ("an embedded "system" block… a prompt injection attempt I should disregard"). The same framing text relabelled `<harness_instructions>` stopped being flagged. The shipped default for Sonnet 5 is the `relay` framing — a user-voice note asking it to guide the user through their own terminal one command at a time, which also names the sandbox as the wrong machine (27/30 on the bench from 5/30; 5/5 through real pi). Sonnet 4.6 shows the same reflex more weakly; it defaults to `relay_batch` (hypotheses §25). Sonnet 5.5 inherits Sonnet 5's `relay`, unbenched (§26). Measurements and the failed alternatives: hypotheses §21; the prompting lesson: prompt-engineering.md.
+
+### GPT-6 Sol: a sandbox of its own on the agent-less path
+
+`Gpt_6_Sol_Reasoning` agent-less (every non-premium account, see the agent note below) runs commands in a remote sandbox by itself: `Progress` frames "Coding and executing" whose `hiddenText` is the command (`bash -lc find /mnt/data /home/oai -name check.py …`, `bash -lc pwd; ls -la; cat calc.py …`), and files it makes come back as Teams `asyncgw` links. It is not (only) the code interpreter the proxy enables: with `M365_NO_CODE_INTERPRETER=1` and no `cwc_code_interpreter*` optionsSets on the wire it ran there just the same (20/28 turns, 0/20 solved). Most of these turns carry **no** `contentOrigin: CodeGenerator`, so look for the Progress frames, not that origin. With the tool agent attached (premium) it never ran there (0/132 turns). Every framing but `relay` sent it to the sandbox; relay kept it out almost entirely (hypotheses §23 F50/F51). Its batching variant `relay_batch` is the shipped default on both paths: it goes there no more often than relay (13 vs 15 turns in 40 tasks each, 2026-10-07, hypotheses §28 F71). The rate of these turns drifts with the service: 2 per 20 relay tasks on 2026-10-05, 15 per 40 two days later, most of them a look around (`bash -lc pwd`, `bash -lc true`) before the model writes the fence, and none cost a task.
+
+### Opus (and Sonnet 5.5) priority access is a separate, much smaller budget
+
+Opus is metered by a **priority-access** allowance that has nothing to do with the ~600-message per-conversation cap or the thread-rate throttle: **40 turns a day and 75 a week**, per account, one per M365 turn whatever its size (Opus 5.5 on the paid scenario only; Opus 4.8 on the included scenario isn't metered). When it runs out, M365 does not throttle or disengage — it ends the turn with a refusal, verbatim:
+
+> You've used your available priority access to the Opus model for today. You can choose another available model or wait until tomorrow to use the Opus model again.
+
+and, once the weekly allowance is gone:
+
+> You've used your available priority access to the Opus model for the week. You can choose another available model or wait until Monday to use the Opus model again.
+
+**Both reset at midnight UTC** (the weekly one on Monday). The hazard is the shape, not the limit. **The refusal is not streamed:** no delta and no content update arrive; the text exists only as a `BotConnection` message inside the final `type:2` item, and as `result.message` next to `result.value: "OutOfCredits"`. A client that builds the answer from the streamed updates (as `session.ts` does) sees an *empty* turn — and the proxy used to treat it as one: two "Please continue." retries (each another refused turn), then a 502 "empty response" (hypotheses §24 F59). A client that reads the final item sees a refusal dressed as the model's answer. Either way, every generic guard misreads it — the same failure class as the image-quota text (§14 H14.4). Refused turns cost no allowance.
+
+**It is flagged on the wire, and the allowance is visible** (service `1.0.0356x`, 2026-10-02/04, hypotheses §24 F55). The refusal turn's final item carries `result: {value: "OutOfCredits", message: "<the refusal text>", creditScenario: "TotalTurn"}`, and the reply comes from `contentOrigin: "BotConnection"`. Every turn on the **paid scenario** — any tone, Sonnet 5 included — also carries a `metering` map inside `throttling`:
+
+```json
+"throttling": { "maxNumUserMessagesInConversation": 600, "numUserMessagesInConversation": 1, …,
+  "metering": { "ClaudeOpusQuery75": {"remainingAllowance": 0}, "ClaudeOpusQueryDaily": {"remainingAllowance": 40},
+                "ClaudeOpusQuery": {"remainingAllowance": 100}, "ClaudeOpusQueryDev": {"remainingAllowance": 5},
+                "ClaudeOpusQueryHourlyDev": {"remainingAllowance": 2}, "ClaudeOpusQueryWeeklyWord": {"remainingAllowance": 75},
+                "ClaudeOpusQueryDailyWord": {"remainingAllowance": 40}, "DeepResearch": {"remainingAllowance": 100}, … } }
+```
+
+Each Opus turn on the paid scenario (agent or not) lowers `ClaudeOpusQuery75` and `ClaudeOpusQueryDaily` by exactly 1, read after the turn; Sonnet 5 turns lower neither. `ClaudeOpusQuery75` is the weekly allowance, 75 turns from the Monday reset (it read 74 after the first turn of the week): the "for the week" refusal arrived when it reached 0. `ClaudeOpusQueryDaily` is 40 per UTC day. One per turn, whatever the prompt size, and `creditScenario: "TotalTurn"`: the budget counts **turns**, not tokens. **Included-scenario turns carry no `metering` at all** — including every Opus 4.5 turn and every Opus 4.8 turn (`claude-opus-4.8`, 0 of 271 turns, hypotheses §36 F90), which is why that model isn't metered.
+
+**Sonnet 5.5 has an allowance of its own** (2026-10-06, hypotheses §26 F64). When `Claude_Sonnet` @ paid became Sonnet 5.5 the map gained `ClaudeSonnet55QueryDaily` and `ClaudeSonnet55QueryWeekly`. They read 79 / 149 after the first Sonnet 5.5 turn of the day (a Tuesday, so the week had started a day earlier) and dropped by exactly 1 on each later Sonnet 5.5 turn, agent or not, including a follow-up turn in the same conversation; Sonnet 5 (`Claude_Sonnet_5`), GPT-6 Sol and GPT-5.5 turns lowered neither. So: **80 turns a day and 150 a week**, one per turn, separate from the Opus budget. **The weekly key resets at midnight UTC every day, not on Monday** (three resets running, 2026-10-06 to -08: it read 94 at 21:56Z on a Wednesday and 150 on the first paid turn after midnight; Opus's weekly key stayed at 0 over the same midnight; hypotheses §30), so with 80 a day the 150 never binds. Its refusal text hasn't been observed yet; the proxy assumes Opus's (`OutOfCredits`, midnight UTC; it would remember a weekly wall until Monday, which can't happen while the weekly key resets daily).
+
+**GPT-6.1 Sol's allowance, `GPT61SolQueryDaily` (40) / `GPT61SolQueryWeekly` (75), is spent by `Gpt_61_Sol_Reasoning` on the paid scenario** (2026-10-06, hypotheses §27 F67). The tone turned up after §26 had found the keys with no tone to match. On a premium account each paid-scenario `Gpt_61_Sol_Reasoning` turn lowered the weekly key by exactly 1, agent or not (74 → 69 over five turns, daily 34 alongside), and included-scenario turns carry no `metering` at all and lowered nothing. Both scenarios self-ID identically ("GPT-6 reasoning model"), and nothing else on the wire differs. `gpt-6.1-sol` therefore routes on the included scenario, which also serves every non-premium account (the paid one answers there with `InvalidCopilotLicense`), so it spends nothing. `M365_SCENARIO=OfficeWebPaidCopilot` would put it on the budget, which the proxy doesn't track.
+
+**What the proxy does with it** (`priority-access.ts`, `handler.ts`): `priorityAccessExhaustionOf()` reads `OutOfCredits` / `result.message` (and still the text, in case a refusal ever streams), and the proxy returns **HTTP 429** with `code: "priority_access_exhausted"`, `param: "day"|"week"` and a `Retry-After` counted to the UTC reset. It remembers the wall until that reset (`activePriorityAccessExhaustion`, per budget), so later requests on that budget get the 429 without an M365 turn. Each turn's allowances are surfaced as `usage.x_m365_opus_daily_remaining` / `x_m365_opus_weekly_remaining` and `usage.x_m365_sonnet55_daily_remaining` / `x_m365_sonnet55_weekly_remaining`. With `M365_OPUS_FALLBACK_MODEL=claude-opus-4.8` (opt-in) the request is re-sent, whole, to that model in a fresh conversation instead of the 429, and later requests go straight there until the reset (issue #18). `M365_SONNET_FALLBACK_MODEL` does the same for Sonnet 5.5 (e.g. `claude-sonnet-5`, which is unmetered). A fallback that names a metered model is ignored.
+
+On the **streaming** path HTTP 200 is committed before the turn even starts, so there is no status code left to set (except when the wall is already known: then the 429 comes before any stream). Two things cover it instead: `couldBePriorityAccessPrefix()` holds the head of the stream until it can no longer be a refusal (releasing within ~45 chars — one short delta on a normal turn), so the refusal is never forwarded as content; and the failure is then emitted as an in-stream `error` chunk carrying the same `type`/`code` plus `retry_after` in seconds. A streaming client can therefore distinguish a quota wall (back off until the reset) from a transient upstream blip (retry now) without string-matching the message.
+
+Prompt size doesn't matter to this budget — it counts turns (above). So the proxy's old default for Opus, the lean `minimal` framing, saved no quota; the only lever is fewer turns per task. Both Opus models now default to `relay_batch` (hypotheses §24 F56, F60): on Opus 4.5 the `<system>`-tagged framings (`minimal`, `baseline`) tripped the jailbreak classifier on 20 of 60 bench tasks and the user-voice relays on none — each of those costs a dead turn plus a retry in a fresh conversation — and relay_batch, which asks for as much as fits in each block, took 2.30 turns per bench task against relay's 3.65.
+
+> ⚠️ **The declarative agent overrides the tone and forces GPT-5.** This is the big one (June 2026, `scripts/tone-probe.mjs`): with **no agent**, `Claude_Sonnet` → real Claude; with the agent attached (`threadLevelGptId`, §10) the *same* tone silently routes to **GPT-5**. So a non-default tone (Claude, and the `*_Reasoning` tones) only takes effect on the **agent-less / plain-chat** path. With a heavy tool prompt a Claude tone + agent goes further and **Disengages persistently** (the `DeepLeo` reasoning pipeline meta-analyses the injected prompt instead of obeying it). Ruled out as causes: prompt wrapper, the `variants` flag list, conversation reuse — isolated cleanly to agent presence.
+>
+> **Consequence:** Claude (and other non-default tones) are usable for plain chat but **not** for tool calling via our emulation agent — tool requests get GPT regardless. The proxy therefore attaches the agent **only when the request carries tools** (`ModelSession.run(..., useAgent=hasTools)`), so plain chat reaches the model the tone selects. Getting Claude-grade *tool* use needs the native-action / MCP path (no declarative agent) — see `docs/hypotheses.md` §8.
+>
+> **Update, 2026-10-01: it depends on the account, and neither account shows the silent switch to GPT-5** (`scripts/agent-tone-probe.mjs`, hypotheses §22 F44, 🟡). On a **premium** account, with the agent attached, `Claude_Sonnet` self-IDs as Sonnet 4.6 on included (2/2) and Sonnet 5 on paid (1/1), and `Claude_Opus` as Opus (1/1), all agent-handled (`3PDeclarativeAgent`). Since 2026-10-06 the paid `Claude_Sonnet` answers as Sonnet 5.5 (3/3), and `Claude_Sonnet_5` serves too: Sonnet 4.6 on included (2/2), Sonnet 5 on paid (1 of 2; the other reply named only "Microsoft Enterprise Copilot") — hypotheses §26. On a **non-premium** account, `Claude_Sonnet` (and `Claude_Sonnet_5`) with the agent is a dead route (BotConnection apology, `result: InternalError`), so Claude tool requests must stay agent-less there. That path is also the one the benchmarks measured (§21). **`Gpt_6_Reasoning` has never served with the agent attached** (dead route on both accounts; agent-less it serves GPT-6, and its 24/30 bench ran agent-less). Because the proxy attached the agent to every non-Claude tool request, `gpt-6-think-deeper` tool calls failed with a 502 (F45). **Fixed (#41):** `toneUsesToolAgent()` now keeps GPT-6 tool requests agent-less too, and its default framing is `relay`. Under `baseline` it worked in M365's code interpreter instead (0/30 vs 30/30, F47).
+
+> **Benched, 2026-10-07 (hypotheses §30):** on a premium account the agent route serves `Claude_Sonnet` and `Claude_Sonnet_5` with all three models behind them — Sonnet 4.6 (both tones @ included), Sonnet 5.5 (`Claude_Sonnet` @ paid) and Sonnet 5 (`Claude_Sonnet_5` @ paid) — and on every one of the three it removes the sandbox (0 of 390 agent tasks and pi runs; agent-less 59% of tasks over 17 framings): the agent path sends no code-interpreter optionsSets, and Sonnet 5's `bash_tool` goes too. They still stay agent-less (`AGENT_CLAUDE_TONES`, F75): Sonnet 5 refuses the harness under the agent, Sonnet 4.6 spends a turn more per real-pi run, Sonnet 5.5 gains nothing else. `Claude_Sonnet` and `Claude_Sonnet_5` @ included are one model (Sonnet 4.6) to the bench as well as to self-ID (F73).
+>
+> **GPT-6 Sol (2026-10-02, hypotheses §23 F49) splits the same way Claude does:** with the agent, `Gpt_6_Sol_Reasoning` serves GPT-6 on a premium account (4/4, both scenarios) and is the dead route (`InternalError`) on a non-premium one (2/2). Nothing on the access token says which kind of account it is, so the proxy learns it: the tone is in `PREMIUM_ONLY_AGENT_TONES`, its first tool request carries the agent, and an `InternalError` with no content marks the agent route dead for the process and re-sends the request agent-less in a fresh conversation (one ~3 s wasted turn per process on a non-premium account; `M365_FORCE_AGENT=0` skips it, `=1` disables the fallback). A premium account occasionally returns the identical `InternalError` mid-conversation as a transient (hypotheses §23 F52), so once the agent has answered for the tone (`noteAgentRouteAlive`) an `InternalError` is retried like on any other agent tone instead of switching the process agent-less.
+>
+> **GPT-6.1 Sol (2026-10-06, hypotheses §27) splits exactly like GPT-6 Sol:** with the agent, `Gpt_61_Sol_Reasoning` serves on a premium account (8/8 across both scenarios) and is the dead route on both non-premium accounts (3/3, included and paid); agent-less it serves on the included scenario everywhere. It is in `PREMIUM_ONLY_AGENT_TONES` too, and the learned fallback is per tone.
+
+### Code interpreter — a real server-side Python sandbox
+
+Enabling these `optionsSets` on the chat turn unlocks M365's actual Python execution environment (the engine behind the "Analyst" experience):
+
+```
+cwc_code_interpreter, cwc_code_interpreter_amsfix, cwc_code_interpreter_citation_fix,
+code_interpreter_interactive_charts, code_interpreter_matplotlib_patching
+```
+
+…plus `GeneratedCode` (and `GenerateContentQuery`) in `allowedMessageTypes`. The model then **writes and runs real Python** and returns true results — verified with a SHA-256 oracle (a correct digest of a unique string is impossible to fake from memory; M365 emitted a `GeneratedCode` frame running `hashlib.sha256(...).hexdigest()` and returned the correct hash). `contentOrigin: DeepLeo`.
+
+The proxy enables this on the **agent-less path** (so plain chat can compute; the tool/agent path is left alone so it doesn't compete with tool-JSON emission). `CODE_INTERPRETER_OPTIONS_SETS` in `session.ts`; disable with `M365_NO_CODE_INTERPRETER=1`. Note it's M365's sandbox, not the harness's — useful for accuracy (hashing, math, parsing, data transforms), not a substitute for the harness's own tools.
+
+> The `optionsSets` array was previously sent **empty**. Live reference implementations (`kuchris/m365-copilot-openai-proxy`, Microsoft's own `PyRIT`) populate it richly — code interpreter, memory, custom-instructions, image input. See `docs/hypotheses.md` §8 for the full catalogue of flags still on the table.
+
+---
+
+## 6. Receiving a response
+
+Streaming arrives as **`type:1`, `target:"update"`** frames whose `arguments[]` contain one of:
+
+### a) Delta update (incremental text)
+```json
+{ "writeAtCursor": "partial text", "streamingMode": "Delta" }
+```
+A delta carries **no `messageId`**. It extends whichever message the most recent **cursor** named (below).
+
+### b) Message update (full snapshot)
+```json
+{ "cursor": { "j": "$['<messageId>'].adaptiveCards[0].body[0].text", "p": -1 },
+  "messages": [{ "author": "bot", "messageId": "<messageId>", "text": "full text so far", ... }] }
+```
+**Only treat a bot message as content when `messageType` is absent.** Messages *with* a `messageType` are control/meta (see below).
+
+**A turn can contain several bot messages** (distinct `messageId`s — separate bubbles in the real client). Claude narrates in one message and writes its tool fence in the next; Sonnet 5 interleaves text with its own tool calls. Each message streams the same way: its **first token arrives only as a snapshot** that carries a `cursor` naming the message, then `writeAtCursor` deltas that extend it, then a final full snapshot. So text must be assembled **per message** — deltas routed by the last cursor, snapshots by their `messageId` — and the messages joined in order of first appearance. Folding everything into one string (what the proxy did until 2026-09-28) drops the head of every message after the first: the new message's head snapshot is shorter than the accumulated text, so it is ignored, and its deltas get glued onto the previous message. Every multi-message turn in that day's dumps was corrupted this way — mostly garbled prose (`"Let me fix that now.python\` tool runs…"`), and sometimes a lost tool call (`"…the SECRET_CODE.bash\ngrep -r …"`: the fence's opening backticks were the dropped head). `TurnTextComposer` (`session.ts`) implements the per-message assembly (#29).
+
+The final-state bot message (in either the last update frame or the `type:2` stream item) also carries:
+
+| Field | What it is | Useful for |
+|---|---|---|
+| `scores: [{ component, score }]` | Per-message classifier scores. Known components: `BotOffense`, `dea_violation`. Values are tiny floats; `dea_violation` correlates with Disengaged firing. | Surface as `usage.x_m365_dea_score`. Lets clients back off before tripping the filter (empirically: clean tool calls ~1e-8, prose ~1e-6, jailbreak-framed ~1e-3, Disengaged > some threshold above 2e-3). |
+| `offense` | `Unknown` / `None` / etc. | Coarser version of the score signal. |
+| `turnCount` | Authoritative server-side turn count for this conversation. | Cross-check against our local counter. |
+| `turnState` | `Completed` (only value observed). | Explicit "this turn is done" signal. |
+| `contentOrigin` | `DeepLeo` (reasoning pipeline) / `officeweb` (user echo) / etc. | Tells which back-end answered without parsing text. |
+| `gptIdentifiers[].compliantAgentName` | `3PDeclarativeAgent` when our Copilot Studio agent handled it. | Confirms the agent attachment took. |
+
+### c) Throttling update
+```json
+{ "throttling": {
+  "numUserMessagesInConversation": 3,
+  "maxNumUserMessagesInConversation": 600,
+  "numLongDocSummaryUserMessagesInConversation": 0
+}}
+```
+See §7.
+
+### Control messageTypes you'll see
+`Disengaged` (see §9), `ReferencesListComplete`, `Progress`, `InternalSearchQuery`, `RenderCardRequest`, `EndOfRequest`, … — none of these carry the answer text.
+
+Two `Progress` shapes are worth reading rather than skipping, both first seen on Claude Sonnet 5 (paid scenario, §5):
+- `contentOrigin: "ChainOfThoughtSummary"`, `addToChainOfThought: true` — a summary of the model's reasoning, streamed as it goes. It is the best RE instrument this API has: it says in plain words *why* the model refused a framing ("this looks like a prompt injection…").
+- `contentType: "Code"` (text "Coding and executing", the command in `hiddenText`) and `contentOrigin: "CreateFileExecutor"` — the model calling its **own** server-side tools. They are declare-to-receive: drop `Progress` from `allowedMessageTypes` and the frames vanish, but the reply still reports `/home/claude` after a tool-call-length pause (10.7 s), so hiding the frames doesn't stop the sandbox (n=1).
+
+### End of turn
+A `type:2` (stream item), `type:3` (completion), or `type:7` (close) ends the turn; we close the socket. Reply to `type:6` pings in the meantime.
+
+### Cancelling a turn (the "Stop generating" button)
+Captured from the real `m365.cloud.microsoft` client (June 2026, `scripts/cancel-frame-capture.mjs`): clicking **Stop generating** sends a single frame **on the same socket**, then the client closes it:
+```
+{"arguments":[{}],"invocationId":"1","target":"stop","type":1}\x1E
+```
+Notes:
+- It's a normal **`type:1` invocation** with `target:"stop"` and **`invocationId:"1"`** (distinct from the chat invocation's `"0"`) — *not* a SignalR `CancelInvocation` (type 5) and *not* a bare socket close.
+- The server **acks with a `type:3` completion** (no error) and replaces the in-progress bot message with the canned text **"You have stopped this conversation."** — the partial answer is discarded.
+- **The cancelled user message still counts** against the 600-msg/conv quota, but its **context persists** server-side (a secret planted in a cancelled turn is recallable next turn). See `docs/hypotheses.md` F11.
+- **Implemented (June 2026):** the proxy now propagates an HTTP-client disconnect as an `AbortSignal` (`completions.post.ts` → `handler` → `model.ts` → `session.ts`); on abort it sends this Stop frame and closes (`STOP_FRAME` in `session.ts`). Before this, every turn ran to a terminator before `ws.close()` and a caller's abort orphaned the generation.
+
+### `type:2` stream item — the conversation summary
+
+The final `type:2` frame carries the canonical state of the whole conversation in `item`:
+
+| Field | Notes |
+|---|---|
+| `messages` | All messages (user + bot, with the final scores attached). |
+| `throttling` | Authoritative quota state. |
+| `result.{value, message, serviceVersion}` | `value: "Success"` + `message:` the final bot text + the M365 service build (e.g. `1.0.03443.34112`). |
+| `turnState` | `Completed`. |
+| `conversationExpiryTime` | ~30 days out — the conversation itself has a hard expiry. |
+| `conversationTransferToken` | Base64. Decodes to `{"type":"FullConversation","conversationId":"..."}`. Mechanism unclear — possibly a handle for migrating a conversation across sessions/hosts; not yet investigated. |
+| `firstNewMessageIndex` | Which message is "new" since the previous turn — could power smarter delta sends. |
+| `telemetry.startTime`, `telemetry.userMessageRequestStartTime` | The latter is always null in our captures; might require a feature-flag flip. |
+
+---
+
+## 7. Throttling & quotas
+
+- **600 user messages per conversation** (`maxNumUserMessagesInConversation`). This is the hard cap; it is **per `ConversationId`**, not per day.
+- This is why we **reuse one conversation** across an agent session and send **only new messages** on follow-up turns (delta mode) — every `Please continue.` retry also counts against the 600.
+- There is also opaque **account-level throttling** (rapid-fire requests can start returning empties). It recovers on its own.
+
+### Account degradation under sustained use (observed June 13 2026)
+
+A full session of heavy use (~80+ messages across probes, bench runs, and logins
+in a few hours) drives the account into a **degraded state** that is distinct from
+the per-conversation 600 cap (which we never approached — every probe used a fresh
+conversation at `1/600`). Characterised behaviour:
+
+- **Onset:** progressive. Early in the session responses were clean; after
+  sustained activity, turns increasingly return **`Disengaged` (→ proxy 502) or
+  empty replies**, even for benign single-tool prompts and fresh conversations.
+- **Signature:** in the benchmark, *work-requiring* tasks (`edit-config`,
+  `find-needle` — must read a real file) **Disengaged on every run** once degraded,
+  while trivial/ fakeable tasks still returned (prose). So degradation manifests as
+  the Disengaged filter firing far more readily, not as an explicit rate-limit error.
+- **Recovery:** self-heals with a lull (a clean `pong` returned after a ~15-min
+  idle gap mid-session). No action needed; just wait.
+- **NOT token-related:** regenerating the MSAL token does **not** clear it — the
+  fresh token carries the same `oid`, so it lands in the same identity-keyed bucket
+  (see §2, `scripts/token-regen-probe.mjs`). Re-auth is not a recovery lever.
+- **NOT the 600 cap:** the per-conversation counter stays low; this is an
+  account/identity-level governor.
+
+**Operational implications.**
+- Treat a sudden rise in `Disengaged`/empty across *fresh* conversations as
+  degradation, not as a content/format problem — **back off and wait**, don't retry
+  (retrying burns quota and re-disengages; the proxy now fails fast on Disengaged).
+- **It confounds experiments.** A/B results gathered while degraded are unreliable
+  (a `Disengaged` can be misread as a format/prompt failure). Run comparative
+  experiments (bench A/Bs) on a **rested account**, and pace requests.
+- The exact trigger (cumulative volume vs requests-per-minute vs a sliding window)
+  is **unquantified** — characterise it with the throttle experiment
+  (`docs/experiments.md` E-T1 / `scripts/throttle-probe.mjs`; hypotheses §8 H8.20).
+
+---
+
+## 8. Conversations & sessions
+
+- A "conversation" = a stable `ConversationId` (+ `X-SessionId`). M365 keeps **server-side context** for it.
+- Each **turn opens a fresh WebSocket** (with `invocationId:"0"`), but reuses the same `ConversationId`/`sessionId`, so the server threads them together. `isStartOfSession:true` only on turn 0.
+- **Send `X-RoutingParameter-SessionKey: <ConversationId>` as a header on every upgrade.** Without it the front end spreads a conversation's connections over backends in two regions (`x-calculatedbetarget` in the upgrade response names the one you got), which keep separate copies of the conversation: the turns fork, the server's `turnCount` steps back (1,2,3,2,4,…), and the model answers from a partial history. The query-string form does not pin. See hypotheses §32 F85 and `scripts/fork-probe.mjs`.
+- Because the server remembers prior turns, follow-ups should send **only the new messages** (the delta), not the whole history. Re-sending the full history confuses it and burns quota. See `ModelSession`/`CopilotSession` and `SessionPool` (`handler.ts`).
+- The proxy adds `disableMemory=1` to the Chathub URL **by default** — M365's temporary-chat control. Both halves are verified (§16 F28/F29, `scripts/temporary-chat-probe.mjs`): the live `ConversationId` still retains multi-turn context across turns, and the thread never appears in the Copilot history sidebar. Without it the proxy leaves one saved thread per prompt in the user's history. The trade is that a proxy conversation can't be recovered from the UI afterwards; `M365_SAVE_HISTORY=1` opts back into saved history.
+
+---
+
+## 9. The "Disengaged" filter
+
+The single biggest gotcha for agentic use.
+
+When M365 dislikes a prompt — **looks like a jailbreak / prompt injection**, or carries a heavy tool block — it returns a bot message:
+
+> **Update (June 2026, F10):** *raw size alone does not trigger Disengaged.* 2M chars (~500k tokens) of benign filler never disengaged and never raised `dea_violation`. The trigger is **shape** (jailbreak framing, large *tool-block* count), not byte count. Read the "too large" lore below as "too large **and** tool-block-shaped." See `docs/hypotheses.md` F9/F10.
+
+```json
+{ "author": "bot", "messageType": "Disengaged",
+  "hiddenText": "> Conversation disengaged", "offense": "None" }
+```
+…and **no answer text**. `offense` is usually `"None"`, so it's not a content-policy block per se — it's a "I'm not going to engage with this" refusal.
+
+**Why it bites agents:** the response has empty content, which is indistinguishable from rate-limiting unless you specifically look for `messageType:"Disengaged"`. Our handler historically retried it as a rate limit (`Please continue.`), which just disengaged again and burned the 600 quota.
+
+**What triggers it (observed):**
+- Large injected tool blocks. Empirically: ~1 tool is fine; **~12 tools is borderline** (disengages once, recovers on retry); a full coding-agent toolset (~15+, e.g. opencode's) disengages **persistently**. (opencode's count has since dropped to 9 — see "Trimming a heavy harness" below.)
+- Aggressive, jailbreak-shaped instructions: fake `<system>`/`<user>`/`<assistant>` turns, "output ONLY JSON", "STRICT RULES", "never describe your intent". These read as manipulation.
+
+**Mitigations:**
+- Keep the **toolset lean** (a handful of tools). Lean harnesses like [pi](https://pi.dev/) stay under the threshold; heavy ones trip it.
+- Prefer a **Copilot Studio agent** (§10) whose tool-calling instructions live server-side, so the per-request prompt can be gentle instead of a wall of rules.
+- Detect `Disengaged` explicitly and surface it rather than retrying blindly.
+
+### Trimming a heavy harness: opencode
+
+> **Scope:** contributed from outside; everything here is measured against **opencode
+> 1.18.18**, not against M365. Whether the trimmed payload actually clears the Disengaged
+> threshold is **not** verified — no live tenant was involved. Read it as "how to get a
+> heavy harness under the limit", not as a new measurement of the limit.
+>
+> One number worth re-checking: opencode 1.18.18 offers **9** tools, not ~15 — the count
+> has moved across releases. Nine is *below* the ~12 borderline stated above, so on tool
+> count alone current opencode may no longer be the persistent-disengage case this
+> section describes. What is unambiguous is the size and shape of the prompt around those
+> tools (below); whether trimming it is still necessary is a live-tenant question we
+> could not answer.
+
+"Keep the toolset lean" is the right instruction, but opencode gives a plugin **no
+supported way to follow it**. Measured against 1.18.18:
+
+| Lever | What actually happens |
+|---|---|
+| `config.tools` from a plugin's `config` hook | Resolved into the config — `opencode debug config` shows it correctly — and then **ignored**. A config disabling eight tools still produced a request offering all nine. |
+| `experimental.chat.system.transform` | Fires, accepts a replacement `system` array, and the request still carries the **original** prompt. |
+| `agent.<name>.prompt` from the `config` hook | Ignored the same way. |
+
+So the trim has to happen in whatever sits between opencode and this API — a proxy sees
+the final OpenAI request and is the only place it reliably lands.
+
+**Most of the payload is a catalogue of things the model cannot use.** On one agentic
+turn the system message was 53,676 chars, of which **`<available_skills>` alone was
+34,263 (64%)** — an inventory of every skill on the machine. Once the toolset is trimmed
+there is no `skill` tool left to invoke any of them, so it is pure weight advertising
+capabilities the model does not have. Dropping that block and the harness persona prose,
+and cutting 9 offered tools to 4, took the same turn to **1,853 chars**.
+
+Two traps for anyone else doing this:
+
+- opencode injects `AGENTS.md` and global rules **as prose** inside the system message,
+  under an `Instructions from: <path>` line — not in a structured block. A "keep only the
+  `<tag>` blocks" rule silently deletes the user's own project rules.
+- opencode 1.18.18 ships **`apply_patch`** as its editing tool where other versions ship
+  `edit`/`write`. A name-based allowlist that covers only one of those leaves the model
+  unable to edit files at all, with only the shell to fall back on.
+
+---
+
+## 10. Tool calling & Copilot Studio agents
+
+M365 Copilot has **no native `tool_calls`**. We emulate it:
+
+1. Inject tool definitions into the prompt as compact text.
+2. Instruct the model to emit a JSON object `{"tool":"name","arguments":{…}}` (a fenced ```` ```json ```` block is fine — `parseToolCalls()` strips the fence).
+3. Parse that back into OpenAI `tool_calls`. A synthetic `reply` tool lets the model return plain text in the same channel.
+
+**The catch:** with prompt-injection alone, M365 **ignores the instructions and answers in prose, or hallucinates tool *results*.** The thing that actually makes it comply is a **server-side system prompt**, delivered via a **Copilot Studio agent**.
+
+> Empirically, the JSON *format* (bare vs ```` ```json ```` vs ```` ```tool_call ````) barely matters — all ~3/3 compliant **with the agent on**. The agent is the lever, not the syntax.
+
+### Model behaviour under tool calling (measurement traps)
+Two behaviours of the chat-tuned model distort any naïve "is it tool-calling yet?" read:
+
+- **It hallucinates success on *fakeable* tasks.** Asked to do something it can answer from
+  its own knowledge (write fizzbuzz, count lines), the model emits a confident *"created and
+  ran it"* prose claim with **zero tool calls** — it "knows" the answer, so it shortcuts the
+  loop. It only reliably calls a tool when the task is **unfakeable** — when proceeding
+  *requires* real file/command state it cannot guess (fix a bug it must read first, find a
+  value in a file, edit an exact config). So a compliance scoreboard built on fakeable tasks
+  flatters the model; weight the unfakeable ones (`needsTool` in `scripts/bench/tasks.mjs`).
+  This is the §9 F-series "create-from-scratch still fakes it" gap.
+- **The harness's own system prompt changes compliance.** The same model is *more* compliant
+  under the bench's short, blunt system prompt than under pi's longer, polished assistant
+  prompt — a strategy can score well on the bench and still confabulate turn-1 ("I can't
+  access the files, please paste them") under real pi (§9 F14). Consequence: the bench picks
+  the *direction*, but a win isn't real until a live **pi/openclaw** run confirms the model
+  actually drives the loop end-to-end.
+
+### Creating the agent (`agent.ts`)
+1. **Discover the environment** via the BAP API:
+   `GET https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/environments/~default?api-version=2023-06-01`
+   → `name` like `Default-<tenantGuid>`.
+2. **Build the Power Platform host.** `envId` is the tenant GUID with dashes stripped. Power Platform splits it across **two DNS labels**: everything but the last two characters, then those two characters as a label of their own —
+
+   ```
+   default<envId[..-2]>.<envId[-2..]>.environment.api.powerplatform.com
+   ```
+
+   e.g. `…9a0eeaa273df` → `default…9a0eeaa273.df.environment.api.powerplatform.com`.
+
+   **This was previously documented (and implemented) as a hardcoded `.df.` plus a "trim the last 2 characters" DNS quirk.** That is wrong, and it was invisible here because this tenant's env ID *ends in* `df` — so the trimmed candidate landed on the correct host by coincidence. Any tenant whose env ID ends in something else got two names that don't resolve, and provisioning failed outright. Measured (@FreemindTrader, [#8](https://github.com/cramt/m365-copilot-proxy/issues/8)): for an ID ending `df` the old and new forms hit the same host (200, byte-identical bot list); the full-length label `ENOTFOUND` either way. Implemented in `getEnvironmentUrl()`.
+3. **Create a bot** via the Copilot Studio `minimalBots` API (`…/copilotstudio/minimalBots/api?api-version=2022-03-01-preview`), with the tool-calling instructions as the GPT component's `instructions` text.
+4. **Publish** it → returns a `TitleId`.
+5. The usable **agent id** is `T_{titleId}.{botId}.gpt.default`, cached in `~/.config/opencode-m365/agent-id.json`.
+
+### Referencing the agent in a chat turn
+Instead of `plugins`, set on the chat message:
+```json
+"threadLevelGptId": { "id": "<agentId>", "source": "MOS3" },
+"gpts": [{ "id": "<agentId>", "source": "MOS3", "version": "1.0.0",
+           "clientOverrides": { "capabilities": [], "deepResearchModels@odata.type": "Collection(String)" } }]
+```
+
+### Versioning the agent by instructions hash
+The agent's instructions are **baked in at create time** and can't be cheaply updated in place (the update API needs a `changeToken` only returned by *create*; `updateBotInstructions()` is dead code). So instead of editing in place, the agent is **versioned by name**:
+
+- Name = `m365-tool-agent-<hash>`, where `<hash>` = first 8 hex of `sha256(getAgentInstructions())`.
+- `getOrCreateAgent()` computes the wanted name, looks for it via `listBots`, and **creates a fresh agent** if absent (instructions are baked into `createBot`). The local cache (`agent-id.json`) stores `instructionsHash`; a mismatch forces a rebuild.
+- Stale `m365-tool-agent-*` bots are **never deleted** — we removed the cleanup pass entirely (multi-host safety, see below). A few orphaned lightweight bots per instruction change are harmless.
+- Hosts sharing a tenant compute the **same name for the same instructions**, so they converge on one agent with no coordination.
+- **Empirically verified:** Copilot Studio reflects the `displayName` we set → `shortBotName` **byte-for-byte** (hyphens, length, case all preserved), which is what makes name-based lookup reliable.
+
+> ✅ Multi-host footgun (resolved by design): editing the instructions changes the hash, so a host on the new build creates a new agent — but it **never deletes the old one**, so hosts still running the old build keep working. (This is *why* there's no cleanup: the previous deletion pass would pull an in-use agent out from under another host mid-conversation.)
+
+> ⚠️ **The deleted-agent trap (observed live, June 2026; now largely moot).** This was *caused* by the cleanup pass, which has since been **removed** — agents are never auto-deleted, so this trap can now only occur if a bot is deleted manually. Kept for diagnostics. A long-lived host (e.g. the systemd service) resolves its agent **once** at first request and keeps the id in memory for the whole process lifetime — `ModelSession.cachedAgentId` is only set when `=== undefined`, and `reset()` does **not** clear it. So a host **cannot self-heal**: once its agent is deleted from the tenant, every subsequent request keeps sending `threadLevelGptId` pointing at a **bot that no longer exists**, and M365 returns an **instant empty reply** (`hasContent=false`, `throttle=null`, ~0.7 s). Symptoms: plain chat hangs (old builds retried empties forever; see quirk #16), tool chat reports a bogus **"rate limited"**. Meanwhile the browser UI works fine because its session is independent of this agent/token state, and `getToken()` is healthy — which makes it look like a token/throttle problem when it is neither.
+>
+> **How to tell it apart:** an empty reply with `throttle: null` returning in well under a second is a dead/invalid agent, **not** throttling (real throttling carries `throttle.current >= throttle.max`). Confirm by listing tenant bots (`scripts/listbots-probe.mjs`) and checking the host's `agent-id.json` `botId` is still present.
+>
+> **Immediate fix:** restart the host (`systemctl restart m365-copilot-proxy`) — it re-resolves/recreates the agent at startup. **Avoid recurrence:** now automatic — agents are never auto-deleted, so an agent only disappears if someone deletes it by hand. **Durable code fix:** clear `cachedAgentId` on an empty reply (and in `reset()`) so the next `run()` re-resolves the agent and the host recovers without a restart.
+
+### Agent types: declarative (`minimalBots`) vs Studio/Dataverse — and why you can't bind a model
+A natural idea is "give each model its own agent with the right system prompt." **You can't, with our agent type.** Reverse-engineering the real Copilot Studio UI (drive it with Playwright, capture its network — see `scripts/studio-dig.mjs`) shows there are **two different species of agent**:
+
+| | **Declarative agent (ours)** | **Studio / PVA bot** |
+|---|---|---|
+| Created via | `copilotstudio/minimalBots/api` | Dataverse + `powervirtualagents/bots/<id>/api/botcomponents` |
+| Stored in | M365/MOS3 declarative-agent layer | **Dataverse** (`<org>.crm4.dynamics.com/api/data/v9.2/bots`) |
+| Plugs into BizChat | ✅ (this is the whole point) | ❓ (untested) |
+| Has a **model field** | ❌ none (only `aISettings.useModelKnowledge` + `gptCapabilities`) | likely (the Studio "model picker" targets these) |
+| Shows in `bots` Dataverse table | ❌ (table is **empty** for us) | ✅ |
+
+Evidence (`scripts/dataverse-bot-probe.mjs`, with a `<org>.crm4.dynamics.com/.default` token):
+- `GET bots(<ourBotId>)` → **404, "Entity 'bot' Does Not Exist"**.
+- Listing **all** Dataverse `bots` → **0 rows**. Our `minimalBots` agents simply aren't Dataverse bots.
+- Copilot Studio *does* ship an agent-model feature — its ECS config (`ecs.office.com/config/v1/CopilotStudio`) exposes `displayModelPicker=true`, `AgentModelSelectionV2`, `isReasoningCardEnabled=true`, even `cuaAnthropicModels` with `modelHint: "sonnet4-6"/"opus4-6"`. But that picker operates on **full Studio/Dataverse bots**, which we neither have nor create.
+- `msdyn_aimodels` exists but is **AI Builder** (invoice/receipt/sentiment/OCR models), unrelated to the Copilot chat LLM.
+
+**Conclusion:** our declarative agent has **no model knob**. The model is *only* the BizChat chat-layer `tone` (§5). Pairing our declarative agent with a non-default **reasoning** tone is an **unsupported combination** — the reasoning pipeline (`contentOrigin: "DeepLeo"`) meta-reasons over the injected prompt instead of obeying it (it will literally critique your few-shot, echo the `{"tool":"<tool_name>"}` template verbatim, and reason itself *out* of using tools). The agent is still attached (`threadLevelGptId` rides along, response is tagged `3PDeclarativeAgent`) — it just loses its grip under a reasoning tone.
+
+**Open frontier:** create a *full* Studio/Dataverse PVA bot (which *can* bind a model) and test whether it's reachable over the same BizChat WS. Different APIs (Dataverse write + PVA `botcomponents` + a different publish path) and unknown BizChat compatibility — filed as the next experiment, not yet done.
+
+---
+
+## 11. Quirks cheat-sheet
+
+| # | Gotcha | Where |
+|---|---|---|
+| 1 | Token goes in the **WS URL query**, not a header | `copilot.ts`/`session.ts` |
+| 2 | Node native `fetch`/`WebSocket` fail; use `ws` + browser `Origin`/`User-Agent` | `session.ts` |
+| 3 | Frames terminated by `0x1E` (RS); multiple per WS message | everywhere |
+| 4 | **Metrics frame required** in the same send as the chat frame | `sendChat()` |
+| 5 | Model chosen by `tone` string, not model id | `MODEL_TONES` |
+| 6 | `nativeclient` redirect bounces to `/common/wrongplace`; scrape `code` from the request | `runBrowserLogin()` |
+| 7 | Hidden duplicate password inputs on the AAD page | `fillVerified()` |
+| 8 | `Disengaged` returns empty content (≠ rate limit) | §9 |
+| 9 | Tool calling needs a Copilot Studio agent | §10 |
+| 10 | Power Platform env host needs last-2-chars trimmed to resolve DNS | `getEnvironmentUrl()` |
+| 11 | 600 messages **per conversation**; reuse + delta to conserve | §7/§8 |
+| 12 | Only bot messages **without** `messageType` are real content | `handleMsg()` |
+| 13 | **Reasoning tones** (`*_Reasoning`/`DeepLeo`) meta-analyze the prompt and disengage; only `magic` + the chat tones (`*_Chat`, which replaced the retired `*_Quick`) work with the agent | §5/§10 |
+| 14 | Our `minimalBots` agents are **not** Dataverse bots (that table is empty) and have **no model field** — can't bind a model | §10 |
+| 15 | Agent is **versioned by name** (`m365-tool-agent-<sha256-prefix>`); editing instructions auto-provisions a new one + cleans up old | §10 |
+| 16 | Empty reply ≠ rate limit unless throttle is at-limit; otherwise fail fast (don't burn 60s of retries) | `handler.ts` |
+| 17 | M365 invents `{"confidence":N}` / `{"final":"…"}` JSON and batches calls + premature `✅ SUCCESS`; proxy strips them + enforces one call/turn | `tools.ts`/`handler.ts` |
+| 18 | **Deleted-agent trap:** a long-lived host caches its agent id for life (`reset()` won't clear it) and can't self-heal when its bot is cleaned up; dead agent → instant empty reply (`throttle:null`, ~0.7s) misread as "rate limited". Restart, or clear `cachedAgentId` on empty | `model.ts`/§10 |
+| 19 | **Cancel** = send `{"type":1,"target":"stop","invocationId":"1","arguments":[{}]}` then close; server acks `type:3` and wipes the partial answer. Still costs 1/600; context persists. **Proxy now sends this on client-abort** | §6/F11 |
+| 20 | **I/O is asymmetric:** input is retrieval-backed ≥500k tokens (benign size never Disengages); output soft-caps ~3k tokens by *concluding early*, not truncating — so big writes look complete but aren't. Proxy advertises 128k window + emits `finish_reason:"length"` near the cap | §6/F9/F10 |
+| 21 | **The agent overrides `tone` → GPT-5** (June 2026). A non-default tone (Claude, `*_Reasoning`) only takes effect with NO agent attached; with the agent it silently routes to GPT (or Disengages on heavy tool prompts). Proxy attaches the agent only for tool requests. **2026-10-01: account-dependent. Premium gets Claude through the agent; non-premium gets a dead route. `Gpt_6_Reasoning` is dead with the agent on both, so its tool requests now go agent-less too** (`toneUsesToolAgent`, #41; hypotheses §22). **`Gpt_6_Sol_Reasoning` takes the agent on premium only; the proxy learns which from the dead route's `InternalError` and falls back agent-less** (`PREMIUM_ONLY_AGENT_TONES`, #23; hypotheses §23). **`Gpt_61_Sol_Reasoning` splits the same way** (hypotheses §27 F68) | §5/§10 |
+| 22 | **`tone` is server-validated** (unknown → `type:3` error), so an accepted tone is real. `Claude_Sonnet` = real Claude Sonnet 4.5; `Gpt_5_5_*` current gen; `Claude_Reasoning` accepted but actually GPT | §5 |
+| 23 | **Code interpreter is real:** `cwc_code_interpreter*` optionsSets + `GeneratedCode` msg type → genuine server-side Python execution. Proxy enables it on the agent-less path. **GPT-6 Sol runs `bash -lc …` in a sandbox (`/mnt/data`, `/home/oai`) agent-less even without those optionsSets** (hypotheses §23 F50) | §5 |
+| 24 | **`optionsSets` was sent empty** — leaves code-interpreter/memory/custom-instructions/image off the table. Reference impls (PyRIT, kuchris) populate it | §5/hypotheses §8 |
+| 25 | **`scenario` gates the model list.** `Gpt_6_Reasoning` is a dead route on `OfficeWebIncludedCopilot` and a real model on `OfficeWebPaidCopilot`, and so was `Claude_Opus` agent-less until October 2026 (on a premium account it is now Opus 4.8 on the included one, Opus 5.5 on the paid one, §36). `licenseType: Premium` rides along but unlocks nothing by itself. Proxy derives it per-turn from the model ID. The scenario can also change which model a tone is: `Claude_Sonnet` is Sonnet 4.6 included and Sonnet 5.5 paid (Sonnet 5, now `Claude_Sonnet_5`, until 2026-10-06). The gate says nothing about metering — GPT-6 and Sonnet 5 are gated but not separately budgeted | §5 |
+| 26 | **Priority-access caps — Opus 5.5 (40 turns/day, 75/week) and Sonnet 5.5 (80/day, 150/week), one per turn** — end the turn with `result.value: "OutOfCredits"` and a refusal that is NOT streamed — it exists only in the final item — so a stream reader sees an empty turn and every generic guard misreads it. Read the result; the proxy 429s, remembers it per budget until the reset (midnight UTC; weekly: Monday — though Sonnet 5.5's weekly key has reset daily, hyp §30), and can fall back (`M365_OPUS_FALLBACK_MODEL`, `M365_SONNET_FALLBACK_MODEL`) | §5/§15, hyp §24 F59, §26 |
+
+---
+
+## 12. Source map
+
+| File | Responsibility |
+|---|---|
+| `packages/core/src/auth.ts` | MSAL PKCE, silent refresh, automated Playwright login, token-for-scope |
+| `packages/core/src/copilot.ts` | One-shot WS chat, `decodeJwt`, `MODEL_TONES`, `VARIANTS` |
+| `packages/core/src/session.ts` | Stateful `CopilotSession` (reconnect per turn, reuse ids), SignalR frame handling |
+| `packages/core/src/model.ts` | `ModelSession` — auth + agent + conversation continuity, string-in/stream-out |
+| `packages/core/src/agent.ts` | Copilot Studio agent create/publish, BAP env discovery |
+| `packages/core/src/schemas.ts` | Zod schemas for SignalR frames & JWT claims |
+| `packages/proxy-lib/src/handler.ts` | OpenAI ↔ M365 translation, `SessionPool`, delta mode, tool-call parsing, one-call-per-turn, empty-response fail-fast |
+| `packages/core/src/tools.ts` | Tool-definition prompt, real-tool few-shot, `parseToolCalls` (bare + fenced, strips `confidence`/`final`) |
+
+### Reverse-engineering probe scripts (`scripts/`, read-only)
+
+| Script | What it digs |
+|---|---|
+| `listbots-probe.mjs` | Dumps `minimalBots` list — shows `displayName`→`shortBotName` round-trip, existing agents |
+| `agent-model-probe.mjs` | Full `minimalBots` agent definition; hunts for a model field (there is none) |
+| `agent-tone-probe.mjs` | `tone-probe` with the tool agent attached: which tones the agent lets through, judged by self-ID + the `3PDeclarativeAgent` tag. Results depend on the account, so it prints and saves which account ran it. `--baseline` adds the agent-less comparison; `--tones=X,Y@paid` narrows the sweep. 1 thread per cell |
+| `studio-dig.mjs` | Logs into the real Copilot Studio UI (Playwright + TOTP) and **captures every API call** → revealed Dataverse + PVA + ECS layers |
+| `dataverse-bot-probe.mjs` | Queries Dataverse (`<org>.crm4.dynamics.com`) directly — proved our agents aren't Dataverse bots |
+| `proxy-verify.mjs` | End-to-end proxy check (`--agent --multiturn --manytools`) — reproduces disengagement, verifies the tool loop |
+| `frame-dump-probe.mjs` | Sends one chat turn and dumps every field of every WS frame; flags token/usage-shaped keys/values. Hunts for hidden metrics. |
+| `tool-compliance-experiment.mjs` | A/B harness over prompt variants × prompts. Scores tool-call compliance and Disengaged rate per variant. Burns ~30 messages. |
+| `usage-endpoint-hunt.mjs` | Sweeps Sydney/Power Platform/BAP REST endpoints looking for token-usage / context-window data outside the WebSocket. |
+| `variants-bisect.mjs` | Bisects the 40-flag `VARIANTS` query-string list to find which flag controls Disengaged / streaming routing. ~10 messages per target. |
+| `toolformat-experiment.mjs` | Older tool-format A/B (bare JSON vs ```` ```json ```` vs ```` ```tool_call ````); kept around for reference. |
+
+Run unsandboxed with `CHROMIUM_PATH` set and `M365_NO_INTERACTIVE=1`. They reuse the stored MSAL cache / automated login. Output (screenshots, captured network) lands in `scripts/*-out/` (gitignored).
+
+### Frame dumping at runtime (`M365_DUMP_FRAMES=1`)
+
+When set, `CopilotSession` appends every WS frame (both `send` and `recv`,
+both raw chat invocation and bot updates) to
+`~/.config/opencode-m365/frames/<requestId>.ndjson` (`M365_FRAME_DIR` names
+another directory, relative to `~/.config/opencode-m365/`). Use this in production
+to catch a regression mid-flight: ship the suspect NDJSON to a dev box and
+diff against a known-good capture. Negligible overhead since the data is
+already in memory.
+
+---
+
+*If a future reader finds any of this is now wrong: M365 Copilot is an undocumented,
+first-party-only surface and Microsoft changes it freely. Re-capture a real session
+from `m365.cloud.microsoft` (browser devtools → WS frames) and diff against the above.*

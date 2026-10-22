@@ -49,3 +49,6 @@ opencode.jsonc
 .cursor/mcp.json
 .agents
 .dsh
+
+# Local planning/spec workspace (not published)
+docs/superpowers/

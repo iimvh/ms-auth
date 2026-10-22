@@ -59,13 +59,13 @@ Each agent session reuses the same M365 conversation (same `sessionId` + `conver
 
 - Node.js 24+
 - pnpm 10+
-- A **work or school (Entra ID) account** with M365 Copilot Chat. Personal Microsoft
-  accounts — Microsoft 365 Personal/Family, Outlook.com, copilot.microsoft.com — are
-  not supported: the proxy talks to the enterprise M365 Copilot service, and the Office
-  client it signs in as rejects personal accounts ("You can't sign in here with a
-  personal account", #64). "Every account" elsewhere in this README means every work
-  or school account, premium or not.
-- A way to sign in, either:
+- **Either** a work or school (Entra ID) account with M365 Copilot Chat, **or** a
+  personal Microsoft account (Outlook.com / Microsoft 365 Personal/Family). The two use
+  different auth paths: the enterprise MSAL flow below, or `M365_AUTH=personal` with a
+  captured consumer session — see [Personal account](#personal-account). "Every account"
+  elsewhere in this README means every work or school account unless the section says
+  otherwise.
+- For the **enterprise** path, a way to sign in, either:
   - **TOTP-based MFA with the base32 secret in hand** — the automated login types the
     6-digit code itself, so it needs the seed, not an app on your phone. See
     [Getting the TOTP secret](#getting-the-totp-secret). This is the headless-friendly
@@ -296,26 +296,74 @@ without NixOS: `nix run github:cramt/m365-copilot-proxy -- 4141`.
 
 ## Personal account
 
-The proxy normally authenticates an **enterprise** (work/school) M365 Copilot via
-MSAL. On a **personal** Microsoft account instead — the consumer Copilot web app —
-set `M365_AUTH=personal`, log in once, and the proxy replays the captured session:
+Personal (consumer) Microsoft accounts live on a different service than the enterprise
+one: `m365.cloud.microsoft/chat`, `scenario=OfficeWebFreeConsumerCopilot`. The proxy
+supports them by **capturing the real web client's session and replaying it**
+(`M365_AUTH=personal`). There is no OAuth app of our own — the captured session *is*
+the credential.
+
+### What this mode can and cannot do
+
+| | |
+|---|---|
+| Model | Consumer Copilot only. Turns are sent with `tone: "Magic"`; asking for a Claude/GPT tone answers `InternalError`. `provider/model` naming is still yours to pick — the answer comes from consumer Copilot. |
+| Turn budget | **`CostQuota`, 80 turns per day**, resetting at 00:00 UTC. Every turn counts, probes included. There is no per-conversation 600-message limit to fall back on. |
+| Tool agent / Copilot Studio | Off. A consumer token has no PowerPlatform scopes. Tool calling still works agent-less through the fenced/shell routing. |
+| Python sandbox, image generation | Off (`M365_PERSONAL_CODE_INTERPRETER=1` re-enables the sandbox). |
+| Throttle/priority-access wall | Not applied — the MSAL priority-access budgets do not exist here; the upstream `CostQuota` is the real limit. |
+
+### Login
+
+A consumer sign-in is behind **Cloudflare** ("verify you are human"). A browser
+*launched* by Playwright can never pass it — the launch itself is the fingerprint. So
+the capture attaches to **your own Chrome** over CDP:
 
 ```sh
-pnpm m365-personal login     # visible browser; sign in; captures the web app's session + probes the model
-pnpm dev                     # boots with personal auth
+# 1. your normal Chrome, with the capture profile and a debug port
+chrome --remote-debugging-port=9222 \
+       --user-data-dir="$HOME/.config/opencode-m365/personal-profile" \
+       https://m365.cloud.microsoft/chat
+
+# 2. capture (it attaches to the Chrome above; it does not open its own)
+M365_PERSONAL_CDP_URL=http://127.0.0.1:9222 pnpm m365-personal login
 ```
 
-No `secrets.json` needed — the browser profile in `~/.config/opencode-m365/personal-profile/`
-is the credential (it also re-mints tokens headlessly when the captured one nears expiry).
-Personal mode runs agent-less with M365's sandbox and image generation off; a dead
-session is a real `401` naming the login command. Full details, env vars, failure
-messages and the runbook: [`docs/personal-auth.md`](docs/personal-auth.md).
+`login` waits for the sign-in to finish, then types one short message to force the
+Chathub WebSocket open, records the socket URL + the first chat invocation frame, and
+runs a one-turn capability probe. It prints the expiry, scenario and probed model.
+
+If `secrets.json` exists (the same file the enterprise login uses) its
+email/password/TOTP drive the sign-in form automatically. Otherwise sign in by hand in
+the window. `M365_PERSONAL_AUTOMATED_LOGIN=0` disables the automated attempt.
+
+```sh
+pnpm m365-personal status        # expiry, scenario, whether the profile exists
+pnpm m365-personal logout        # deletes the record and the browser profile
+```
+
+Without `M365_PERSONAL_CDP_URL`, `login` falls back to launching its own Chromium — fine
+for looking around, but Cloudflare will refuse the conversation. Prefer CDP.
+
+### Running
+
+```sh
+M365_AUTH=personal pnpm dev
+```
+
+The token is re-minted from the same browser profile when it nears expiry. A dead
+session is a real `401` naming the login command, before any stream byte.
+
+Captured state lives under `~/.config/opencode-m365/`: `personal-profile/` (the
+signed-in browser — this is the durable secret) and `personal-session.json` (the bearer
+token cache). Full env vars, failure messages and the operator runbook:
+[`docs/personal-auth.md`](docs/personal-auth.md).
 
 ## Available models
 
-> **Using a personal Microsoft account instead of a work/school one?** See
-> [Personal account](#personal-account) below: `M365_AUTH=personal`, one
-> `pnpm m365-personal login`, no secrets.json.
+> **Using a personal Microsoft account?** See [Personal account](#personal-account):
+> the consumer service serves its own Copilot model only, so the model IDs below map
+> to tones that consumer accounts reject (`InternalError`). Set `M365_AUTH=personal`
+> and pick any model name — the answer still comes from consumer Copilot.
 
 | Model ID | M365 Tone | Description |
 |---|---|---|
@@ -645,6 +693,17 @@ Three token scopes are acquired:
 | `M365_CACHE_FILE` | Override MSAL token cache location |
 | `M365_SECRETS_FILE` | Override credentials file location |
 | `CHROMIUM_PATH` | Path to Chromium binary for automated login |
+| `M365_AUTH` | `msal` (default) or `personal`. An unknown value fails at boot naming the allowed values. See [Personal account](#personal-account). |
+| `M365_PERSONAL_CDP_URL` | Attach the personal capture to an already-running Chrome instead of launching one (e.g. `http://127.0.0.1:9222`). Required in practice: the consumer sign-in is behind a Cloudflare gate that refuses a Playwright-launched browser. |
+| `M365_PERSONAL_SESSION_FILE` / `M365_PERSONAL_PROFILE` | Override the personal record file and browser-profile directory (defaults `~/.config/opencode-m365/personal-session.json` and `.../personal-profile/`). |
+| `M365_PERSONAL_MODEL` | Override the default upstream model name personal mode reports. |
+| `M365_PERSONAL_PROBE_MODELS` / `M365_PERSONAL_PROBE` | Candidate ladder for the login-time capability probe (default `claude-sonnet`); `M365_PERSONAL_PROBE=0` skips it. |
+| `M365_PERSONAL_AUTOMATED_LOGIN` | `0` stops `login` from driving the sign-in form with `secrets.json` (email/password/TOTP) and waits for a human instead. |
+| `M365_PERSONAL_LOGIN_WAIT_MS` | How long a headed `login` waits on the sign-in page (default `300000`). |
+| `M365_PERSONAL_TOKEN_TTL_MS` | The consumer token is an opaque JWE with no readable `exp`; this is the TTL its expiry is estimated from (default `3600000`, matching the observed 60-minute token). |
+| `M365_PERSONAL_MINT_WAIT_MS` / `M365_PERSONAL_MINT_MIN_INTERVAL_MS` / `M365_PERSONAL_MINT_MAX_PER_HOUR` | Re-mint pacing: how long to wait for the app's socket on page load (`10000`), minimum spacing between mints (`600000`), and the hourly mint budget (`3`), each mint being a conversation. |
+| `M365_PERSONAL_VERIFY_WAIT_MS` | How long a capture waits for a human to clear Microsoft's verification/security-check dialog before giving up (default `300000`). |
+| `M365_PERSONAL_CODE_INTERPRETER` | `1` re-enables M365's Python sandbox optionsSets in personal mode (off by default). |
 
 ### Usage / context-window % in responses
 

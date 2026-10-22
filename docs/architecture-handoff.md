@@ -145,6 +145,48 @@ domains — `protocol` and `auth/personal`.
 6. **Collapse the package layout** into `src/modules/*` + `src/app/*`, still one
    binary (`m365-proxy`) and one CLI (`m365-personal`).
 
+## Context window and handoff (agreed, not implemented)
+
+The advertised window is wrong today: `proxy-lib/src/index.ts` sends
+`context_window: 1_000_000` for *every* model, which is a Gemini-tier number
+Copilot does not use. Working assumption until measured:
+
+| Mode | `M365_CONTEXT_WINDOW` |
+|---|---|
+| personal (consumer `auto`) | **200_000** (chosen; conservative middle of 128k–200k) |
+| enterprise default | 200_000 |
+| premium Opus / GPT-6 | 200_000 (1M is a separate tier, unproven here) |
+
+`M365_MAX_OUTPUT_TOKENS` should be 32_000, not 1M. Context should become
+per-model in `/v1/models`, not one constant.
+
+Two follow-ups, in order:
+
+1. **Do not open a new conversation while a session is under the ceiling.**
+   Audit result (Oct 22): there is no such spam today — the six
+   `newConversation()` calls in `handler.ts` fire only on a non-continuation
+   re-send (227, measured: reusing contaminates, 7/10 → 3/10), a model/agent
+   fallback (380, 622, 653, 728) or a Disengaged retry (687, a Disengaged
+   conversation stays Disengaged). The real gap is that nothing opens a new
+   conversation *because the context is nearly full* — that is item 2. Worth
+   reviewing separately: `SessionPool` evicts an idle session at 30 minutes,
+   which abandons a still-live M365 conversation (costs no turn, but ends a
+   long session's continuity).
+2. **Measure tokens, then hand off.**
+   - `usage.x_m365_prompt_tokens_est`: estimate the prompt actually sent
+     (`messages` + `tools` + framed text, chars/4 or a real tokenizer). Offline,
+     no M365 turn, and the only honest basis for any threshold. Note the
+     existing `x_m365_conversation_pct` is *messages*/600, not tokens — useless
+     as a context gauge.
+   - Thresholds: ≤60% normal; 60–80% warn (surface the real percentage to the
+     client); >80% proactively `newConversation()`.
+   - Handoff is cheap here: the harness re-sends the whole history every
+     request and `formatMessages` re-renders it, so a fresh M365 conversation
+     loses nothing; an optional one-time summary turn is the only cost.
+   - Optional, log-only heuristic: the model asking again for something already
+     in the history (a created file, a read path) means M365 truncated the
+     context underneath us.
+
 ## Smaller follow-ups agreed (not architecture)
 
 - **Gateway observability** (its weakest point): one INFO line per request —

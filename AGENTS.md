@@ -350,3 +350,7 @@ regression, so don't chase it (re-confirmed 2/2 on 2026-09-21; §9 F-route).
 
 - Conventional Commits (`fix:`, `feat:`, `docs:`, `chore:`, `build:`). No `Co-Authored-By` lines.
 - Small, focused files; handle errors explicitly; prefer immutable updates.
+
+## Adapter boundary
+
+`packages/core/src/adapters/msal` and `packages/core/src/adapters/personal` must not import each other: each is a complete credential source, so a cross-import means credential selection has leaked back into shared code, the coupling ADR-0001 confines to `app/model-session.ts`. Enforced by `pnpm lint:boundaries` (`scripts/adapter-boundaries.ts`, tested in `packages/core/src/adapter-boundaries.test.ts`); the graph baseline is `scripts/dependency-graph-baseline.json`, refreshed with `pnpm lint:boundaries:baseline` in the same commit that moves modules.

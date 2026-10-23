@@ -1,0 +1,655 @@
+{
+  "adapterRoot": "packages/core/src/adapters",
+  "nodes": [
+    "./personal-harvest.js",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:os",
+    "node:path",
+    "node:url",
+    "otpauth",
+    "packages/core/src/account-registry.ts",
+    "packages/core/src/agent.ts",
+    "packages/core/src/auth-recovery.ts",
+    "packages/core/src/auth.ts",
+    "packages/core/src/copilot.ts",
+    "packages/core/src/fenced.ts",
+    "packages/core/src/image-input.ts",
+    "packages/core/src/image.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/log.ts",
+    "packages/core/src/model.ts",
+    "packages/core/src/personal-auth.ts",
+    "packages/core/src/personal-capture.ts",
+    "packages/core/src/personal-cli.ts",
+    "packages/core/src/personal-harvest-cdp.ts",
+    "packages/core/src/personal-health.ts",
+    "packages/core/src/personal-mode.ts",
+    "packages/core/src/personal-session.ts",
+    "packages/core/src/priority-access.ts",
+    "packages/core/src/schemas.ts",
+    "packages/core/src/session.ts",
+    "packages/core/src/tools.ts",
+    "packages/core/src/turn-budget.ts",
+    "playwright",
+    "ws",
+    "zod/v4"
+  ],
+  "edges": [
+    {
+      "from": "packages/core/src/account-registry.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/account-registry.ts",
+      "to": "node:os",
+      "specifier": "node:os",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/account-registry.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/account-registry.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/account-registry.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "node:crypto",
+      "specifier": "node:crypto",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "node:os",
+      "specifier": "node:os",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 6
+    },
+    {
+      "from": "packages/core/src/agent.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/auth-recovery.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "node:child_process",
+      "specifier": "node:child_process",
+      "line": 8
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "node:os",
+      "specifier": "node:os",
+      "line": 10
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 9
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "otpauth",
+      "specifier": "otpauth",
+      "line": 273
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 36
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "packages/core/src/personal-auth.ts",
+      "line": 37
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "packages/core/src/personal-mode.ts",
+      "line": 38
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "playwright",
+      "specifier": "playwright",
+      "line": 333
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "playwright",
+      "specifier": "playwright",
+      "line": 502
+    },
+    {
+      "from": "packages/core/src/copilot.ts",
+      "to": "packages/core/src/priority-access.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/copilot.ts",
+      "to": "packages/core/src/schemas.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/fenced.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/fenced.ts",
+      "to": "packages/core/src/copilot.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/fenced.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/fenced.ts",
+      "to": "packages/core/src/tools.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/image-input.ts",
+      "to": "node:crypto",
+      "specifier": "node:crypto",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/image-input.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/image-input.ts",
+      "to": "packages/core/src/tools.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/image.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 12
+    },
+    {
+      "from": "packages/core/src/image.ts",
+      "to": "packages/core/src/copilot.ts",
+      "line": 16
+    },
+    {
+      "from": "packages/core/src/image.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 14
+    },
+    {
+      "from": "packages/core/src/image.ts",
+      "to": "packages/core/src/session.ts",
+      "line": 13
+    },
+    {
+      "from": "packages/core/src/image.ts",
+      "to": "packages/core/src/turn-budget.ts",
+      "line": 15
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "./personal-harvest.js",
+      "line": 172
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/agent.ts",
+      "line": 81
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 175
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/image-input.ts",
+      "line": 24
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 199
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-auth.ts",
+      "line": 169
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-capture.ts",
+      "line": 171
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-harvest-cdp.ts",
+      "line": 173
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-health.ts",
+      "line": 174
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-mode.ts",
+      "line": 168
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 170
+    },
+    {
+      "from": "packages/core/src/log.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/log.ts",
+      "to": "node:os",
+      "specifier": "node:os",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/log.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/agent.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/copilot.ts",
+      "line": 9
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/image-input.ts",
+      "line": 6
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 7
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/personal-auth.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/personal-mode.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/session.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/model.ts",
+      "to": "packages/core/src/turn-budget.ts",
+      "line": 8
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "./personal-harvest.js",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 6
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 7
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/personal-capture.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/personal-harvest-cdp.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "node:child_process",
+      "specifier": "node:child_process",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 296
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "packages/core/src/auth.ts",
+      "line": 413
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-capture.ts",
+      "to": "playwright",
+      "specifier": "playwright",
+      "line": 343
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "node:url",
+      "specifier": "node:url",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 7
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 9
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/personal-capture.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 6
+    },
+    {
+      "from": "packages/core/src/personal-cli.ts",
+      "to": "packages/core/src/session.ts",
+      "line": 8
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "./personal-harvest.js",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "packages/core/src/personal-capture.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "playwright",
+      "specifier": "playwright",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "playwright",
+      "specifier": "playwright",
+      "line": 53
+    },
+    {
+      "from": "packages/core/src/personal-health.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-health.ts",
+      "to": "packages/core/src/personal-harvest-cdp.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-health.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-health.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-mode.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-mode.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-mode.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-session.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-session.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-session.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/personal-session.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/schemas.ts",
+      "to": "zod/v4",
+      "specifier": "zod/v4",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 33
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/image-input.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 26
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/personal-auth.ts",
+      "line": 30
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/personal-mode.ts",
+      "line": 29
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 31
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 32
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/priority-access.ts",
+      "line": 28
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/turn-budget.ts",
+      "line": 27
+    },
+    {
+      "from": "packages/core/src/session.ts",
+      "to": "ws",
+      "specifier": "ws",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/tools.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/turn-budget.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/turn-budget.ts",
+      "to": "node:os",
+      "specifier": "node:os",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/turn-budget.ts",
+      "to": "node:path",
+      "specifier": "node:path",
+      "line": 3
+    },
+    {
+      "from": "packages/core/src/turn-budget.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 4
+    }
+  ]
+}

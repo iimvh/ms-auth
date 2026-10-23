@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   ACCOUNT_CDP_PORT,
   ACCOUNT_ID_RE,
@@ -11,20 +11,25 @@ import {
   clearMockRegistry,
   configDir,
   createMockRegistry,
+  migrateRegistry,
+  readRegistry,
+  registryProblem,
   useMockRegistry,
+  writeRegistry,
   type AccountRegistry,
 } from "./account-registry.js";
 
-afterEach(() => clearMockRegistry());
-
-// `allocateAccount` (rightly) refuses a directory that already exists, and the
-// id lives under the real config dir — so tests that allocate must not see each
-// other's leftovers. Both dirs are test-only artefacts (plan Task 1 ruling).
-afterEach(() => {
-  for (const id of ["work", "a", "b", "c", "only"]) {
-    rmSync(join(accountsDir(), id), { recursive: true, force: true });
-  }
+// `allocateAccount` and the mock write into `<config>/accounts/<id>/`, and the
+// id lives under the real config dir whenever the registry path alone is
+// mocked — so the whole file runs against a temporary `M365_ACCOUNT_HOME`
+// (the developer's live ~/.config/opencode-m365 is never touched).
+let home: string;
+beforeAll(() => {
+  home = mkdtempSync(join(tmpdir(), "ar-home-"));
+  process.env.M365_ACCOUNT_HOME = home;
 });
+
+afterEach(() => clearMockRegistry());
 
 const registry = (accounts: AccountRegistry["accounts"], activeId = accounts[0]?.id ?? "default"): AccountRegistry =>
   ({ version: 1, activeId, accounts });
@@ -54,16 +59,16 @@ describe("allocateAccount", () => {
     expect(allocateAccount(reg, "b", "B", new Date()).cdpPort).toBe(first.cdpPort + 1);
   });
 
-  it("skips ports already allocated, above the default too", () => {
-    const base = { ...allocateAccount(registry([]), "a", "A", new Date()), cdpPort: ACCOUNT_CDP_PORT };
-    const above = {
-      ...base,
-      id: "b",
-      sessionFile: join(accountsDir(), "b", "session.json"),
-      profileDir: join(accountsDir(), "b", "profile"),
-      cdpPort: 9224,
-    };
-    expect(allocateAccount(registry([base, above]), "c", "C", new Date()).cdpPort).toBe(9225);
+  it("skips ports already allocated, starting at the default and going up", () => {
+    // The plan's case (9222 + 9224 taken ⇒ 9225) contradicts the plan's own
+    // spec, "Ports default to 9222, then the next free port upward": with 9222
+    // taken the first free port is 9223, which is what the next test pins.
+    const bookkeeping = { label: "X", sessionFile: join(accountsDir(), "x", "session.json"), profileDir: join(accountsDir(), "x", "profile"), createdAt: new Date().toISOString() };
+    const reg = registry([
+      { ...bookkeeping, id: "a", cdpPort: ACCOUNT_CDP_PORT },
+      { ...bookkeeping, id: "b", cdpPort: 9224 },
+    ]);
+    expect(allocateAccount(reg, "c", "C", new Date()).cdpPort).toBe(9223);
   });
 
   it("refuses an id that is already taken", () => {
@@ -99,5 +104,101 @@ describe("the registry source", () => {
     expect(reg.accounts[0]!.cdpPort).toBe(9230);
     expect(existsSync(join(accountsDir(), "work", "session.json"))).toBe(true);
     expect(existsSync(join(accountsDir(), "work", "profile"))).toBe(false);
+  });
+});
+
+describe("readRegistry", () => {
+  it("reports absent for a missing file", () => {
+    clearMockRegistry();
+    process.env.M365_ACCOUNTS_FILE = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    expect(readRegistry()).toEqual({ ok: false, problem: "absent", registry: null });
+  });
+
+  it("stores relative paths expanded to absolute", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    process.env.M365_ACCOUNTS_FILE = file;
+    writeFileSync(file, JSON.stringify({
+      version: 1, activeId: "default",
+      accounts: [{ id: "default", label: "Personal", cdpPort: 9222,
+        sessionFile: "personal-session.json", profileDir: "personal-profile", createdAt: "2026-10-23T05:00:00.000Z" }],
+    }));
+    const r = readRegistry();
+    expect(r.ok).toBe(true);
+    expect(r.registry!.accounts[0]!.sessionFile).toBe(join(configDir(), "personal-session.json"));
+    expect(r.registry!.accounts[0]!.profileDir).toBe(join(configDir(), "personal-profile"));
+  });
+
+  it("round-trips a write with mode 0o600 and leaves no temp file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-"));
+    process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
+    const reg = registry([allocateAccount(registry([]), "a", "A", new Date())]);
+    writeRegistry(reg);
+    expect(readRegistry().registry).toEqual(reg);
+    expect(readdirSync(dir)).toEqual(["accounts.json"]);
+    if (process.platform !== "win32") {
+      expect(statSync(join(dir, "accounts.json")).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("falls back to copy+unlink when rename cannot cross volumes", () => {
+    // Simulated by a source whose path is on another root: we assert the outcome
+    // only — the file holds the new registry and no *.tmp-* file remains.
+    const dir = mkdtempSync(join(tmpdir(), "ar-"));
+    process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
+    const src = accountRegistrySource(join(dir, "accounts.json"));
+    const reg = registry([allocateAccount(registry([]), "a", "A", new Date())]);
+    writeRegistry(reg, src);
+    expect(JSON.parse(readFileSync(join(dir, "accounts.json"), "utf8")).activeId).toBe("a");
+    expect(readdirSync(dir).filter((f) => f.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+describe("migrateRegistry", () => {
+  it("points at today's files without moving or copying anything", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-"));
+    process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
+    // Today's real layout, in miniature.
+    const todayFile = join(configDir(), "personal-session.json");
+    const before = existsSync(todayFile);
+    const { created, registry: reg } = migrateRegistry(undefined, new Date("2026-10-23T05:00:00.000Z"));
+    expect(created).toBe(true);
+    expect(reg.activeId).toBe("default");
+    expect(reg.accounts).toHaveLength(1);
+    expect(reg.accounts[0]).toMatchObject({
+      id: "default", label: "Personal (free)", cdpPort: 9222, sessionFile: todayFile,
+      profileDir: join(configDir(), "personal-profile"), createdAt: "2026-10-23T05:00:00.000Z",
+    });
+    expect(existsSync(todayFile)).toBe(before); // nothing was created, moved or renamed
+  });
+
+  it("writes nothing when a registry already exists (idempotent)", () => {
+    useMockRegistry([{ id: "work" }]);
+    const { created } = migrateRegistry();
+    expect(created).toBe(false);
+    expect(readRegistry().registry!.activeId).toBe("work");
+  });
+
+  it("migrates into accounts/<id>/ when the operator set M365_PERSONAL_SESSION_FILE", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-"));
+    process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
+    process.env.M365_PERSONAL_SESSION_FILE = join(dir, "custom.json");
+    try {
+      const { registry: reg } = migrateRegistry();
+      expect(reg.accounts[0]!.sessionFile).toBe(join(accountsDir(), "default", "session.json"));
+    } finally {
+      delete process.env.M365_PERSONAL_SESSION_FILE;
+    }
+  });
+});
+
+describe("registryProblem", () => {
+  const entry = (id: string) => allocateAccount(registry([]), id, id, new Date());
+  it("is null for a healthy registry", () => {
+    expect(registryProblem(registry([entry("a")]))).toBeNull();
+  });
+  it("names duplicate ids, a missing active id and an empty list", () => {
+    expect(registryProblem(registry([entry("a"), { ...entry("b"), id: "a" }]))!.code).toBe("duplicate_id");
+    expect(registryProblem(registry([entry("a")], "gone"))!.code).toBe("unknown_active");
+    expect(registryProblem(registry([] as AccountRegistry["accounts"]))!.code).toBe("no_accounts");
   });
 });

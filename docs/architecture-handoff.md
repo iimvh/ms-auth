@@ -1,8 +1,19 @@
 # Architecture handoff — ms-auth / ms-gateway (Oct 22 2026)
 
+> **SUPERSEDED — do not follow this document's architecture advice.**
+> Its "Target architecture: modulith by domain" and "Migration order" are
+> replaced by [ADR-0001 — Ports and Adapters for `packages/core`](adr/0001-ports-and-adapters.md).
+> The modular monolith proposed here was rejected; the repo follows the ADR.
+> This file is kept as a historical record of the handoff, and for the consumer
+> findings it captured (context-window numbers, per-mode handoff thresholds).
+> Those findings are kept as recorded on Oct 22 and are **not** maintained here —
+> where one is now known to be wrong it is marked inline, and `docs/hypotheses.md`
+> remains the current source of truth.
+
 State at handoff, decisions made, and the module plan agreed for the next
-session. Nothing here is implemented yet; the code is exactly as shipped in
-`ms-auth@a91f2d7` (2 commits) and `ms-gateway@df916ef`.
+session. Nothing was implemented at the time of writing; the code was exactly as
+shipped in `ms-auth@a91f2d7` (2 commits) and `ms-gateway@df916ef`. That is no
+longer true of the architecture sections — see the notice above.
 
 ## Where the code is
 
@@ -60,6 +71,13 @@ Stack verdict: **no stack change**. The leverage is architecture and
 fixture-based testing, not the language.
 
 ## Target architecture: modulith by domain
+
+> **SUPERSEDED.** Rejected in favour of
+> [ADR-0001 — Ports and Adapters for `packages/core`](adr/0001-ports-and-adapters.md).
+> The module tree, the dependency tiers and the `TurnContext` sketch below are
+> not the target layout and are kept only to record what was proposed. The ADR
+> restates the reasons for rejecting it (single-implementation modules, two
+> rules that contradict the code, an unnecessary public-API change).
 
 One binary, hard module boundaries, one-way dependencies.
 
@@ -127,6 +145,13 @@ domains — `protocol` and `auth/personal`.
 
 ## Migration order (safe, incremental — no big bang)
 
+> **SUPERSEDED.** Replaced by the layout and single boundary rule in
+> [ADR-0001](adr/0001-ports-and-adapters.md). Do not follow the steps below as
+> current migration advice. Two of them still stand on their own merits and are
+> prerequisites the ADR also names — golden frame fixtures (step 2) and the
+> `dependency-cruiser` baseline (step 1); the rest describe moving code into
+> modules that were never adopted.
+
 1. **Add dependency rules for the *current* layout** (`dependency-cruiser`),
    record the baseline, see the real coupling. Cheap, no behaviour change.
 2. **Golden-frame fixtures.** Turn existing `M365_DUMP_FRAMES=1` dumps into
@@ -147,6 +172,11 @@ domains — `protocol` and `auth/personal`.
 
 ## Context window and handoff (agreed, not implemented)
 
+> **Findings only — not architecture advice.** The numbers below are as
+> recorded on Oct 22 2026 and are **wrong today**; they are left unedited so the
+> record stays honest, with the corrections marked inline. Every claim in this
+> section now lives in `docs/hypotheses.md` (F9, F97–F110), which is current.
+
 The advertised window is wrong today: `proxy-lib/src/index.ts` sends
 `context_window: 1_000_000` for *every* model, which is a Gemini-tier number
 Copilot does not use. Working assumption until measured:
@@ -159,6 +189,17 @@ Copilot does not use. Working assumption until measured:
 
 `M365_MAX_OUTPUT_TOKENS` should be 32_000, not 1M. Context should become
 per-model in `/v1/models`, not one constant.
+
+**Status (added Oct 23 2026 — this table was never implemented).** None of the
+values above were shipped. `packages/proxy-lib/src/index.ts` still advertises a
+single `1_000_000` context window *and* `1_000_000` max output for every model
+(both env-overridable via `M365_CONTEXT_WINDOW` / `M365_MAX_OUTPUT_TOKENS`, so
+the table's numbers are reachable by setting the env var, but not by default).
+The 200k guess was superseded by measurement, not adopted: F9 records M365
+accepting ≥500k tokens of input (retrieval-backed, so a floor rather than a
+wall) and output soft-capping around 3k tokens. The per-model split proposed
+here was never built. Treat `docs/hypotheses.md` F9 as the measured record and
+do not cite 200_000 as the current value.
 
 Two follow-ups, in order:
 
@@ -197,6 +238,12 @@ Two follow-ups, in order:
 
 ### Limits differ by mode — handoff thresholds must too
 
+> **Findings only — kept as recorded, thresholds unmeasured.** The rate-limit
+> tiers below are the durable finding. The 60/80% thresholds are placeholders
+> from before the token estimate existed and were never derived from a
+> measurement; item 2 above (measure `x_m365_prompt_tokens_est` first, then set
+> thresholds) is still the open work. Do not read the percentages as calibrated.
+
 Thresholds (agreed; the measurement that sets them is item 2): ≤60% normal;
 60–80% warn (`x_m365_prompt_tokens_est` surfaced as a percentage); >80% hand
 off proactively with `newConversation()`. Those are the **enterprise** numbers;
@@ -230,6 +277,12 @@ the turn, and the turn is already counted), later on enterprise
 - Personal mode: free tier is 80 turns/day; never bench against it.
 
 ## Open questions for next session
+
+> **Partly superseded.** The `AuthProvider` interface referenced below belongs
+> to the rejected modulith design; the accepted answer is
+> [ADR-0001](adr/0001-ports-and-adapters.md)'s `TurnContext` plus one directory
+> under `adapters/` per auth mode. The `framing/` and gateway questions are
+> still open.
 
 - Do we keep `M365_AUTH` as the only switch, or add a third mode later (Entra
   B2C, another tenant type)? The `AuthProvider` interface above is shaped so

@@ -1,8 +1,9 @@
-import { type ModelSessionOptions, getAvailableModels, isPersonalMode, ensurePersonalCredentials } from "@m365-copilot/core";
+import { type ModelSessionOptions, getAvailableModels, isPersonalMode, ensurePersonalCredentials, resolveAccount } from "@m365-copilot/core";
 import { ChatCompletionRequest } from "./schemas.js";
 import { SessionPool, handleChatCompletion } from "./handler.js";
 
 export { SessionPool, handleChatCompletion } from "./handler.js";
+export { buildHealthzPayload, type HealthzPayload } from "./healthz.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 
 // Re-export tool utilities from core
@@ -80,6 +81,21 @@ export interface FetchApp {
   fetch(req: Request): Promise<Response>;
 }
 
+export interface CreateAppOptions extends ModelSessionOptions {
+  /**
+   * The personal account each request runs on, resolved PER REQUEST: a function,
+   * not a value, so a switch (POST /accounts/:id/activate) takes effect on the
+   * next request without rebuilding the app (spec §7.3). Defaults to core's
+   * `resolveAccount()` in personal mode, and null (the builtin layout) otherwise.
+   */
+  accountId?: () => string | null;
+}
+
+/** The default per-request account: the registry's active one, in personal mode. */
+function activeAccountId(): string | null {
+  return isPersonalMode() ? resolveAccount().id : null;
+}
+
 /**
  * Create a framework-free fetch handler that serves an OpenAI-compatible API
  * backed by M365 Copilot. Each distinct conversation automatically gets its own
@@ -89,7 +105,8 @@ export interface FetchApp {
  * openclaw-plugin. The standalone server is the Nitro app in `@m365-copilot/proxy`,
  * whose routes reuse the same `handleChatCompletion` / `buildModelsPayload` helpers.
  */
-export function createApp(sessionOptions: ModelSessionOptions = {}): FetchApp {
+export function createApp(options: CreateAppOptions = {}): FetchApp {
+  const { accountId: accountIdOf = activeAccountId, ...sessionOptions } = options;
   const pool = new SessionPool(sessionOptions);
 
   async function fetch(req: Request): Promise<Response> {
@@ -118,9 +135,13 @@ export function createApp(sessionOptions: ModelSessionOptions = {}): FetchApp {
         );
       }
       // req.signal aborts when the client disconnects → cancels the M365 turn.
+      // The account is read here, per request, and handed on to the pre-flight
+      // credential mint, the pool's fingerprint and the backoff/budget keys.
+      const personal = isPersonalMode();
       return withCors(await handleChatCompletion(body, pool, {
         signal: req.signal,
-        ensureCredentials: isPersonalMode() ? ensurePersonalCredentials : undefined,
+        accountId: accountIdOf(),
+        ensureCredentials: personal ? (id) => ensurePersonalCredentials(id ?? undefined) : undefined,
       }));
     }
 

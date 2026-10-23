@@ -1,5 +1,5 @@
 import { ChatCompletionRequest, handleChatCompletion } from "@m365-copilot/proxy-lib";
-import { isPersonalMode, ensurePersonalCredentials } from "@m365-copilot/core";
+import { isPersonalMode, ensurePersonalCredentials, resolveAccount } from "@m365-copilot/core";
 import { pool } from "../../../server-pool";
 
 export default defineEventHandler(async (event) => {
@@ -28,10 +28,34 @@ export default defineEventHandler(async (event) => {
     res.once("close", maybeAbort);
   }
 
+  // The account is resolved PER REQUEST (§7.3): a switch takes effect on the
+  // next request, with no restart and no rebuild of the pool. A broken registry
+  // is reported here rather than crashing the route — the request cannot run
+  // without knowing whose credentials to use.
+  const personal = isPersonalMode();
+  let accountId: string | null = null;
+  if (personal) {
+    try {
+      accountId = resolveAccount().id;
+    } catch (err) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: err instanceof Error ? err.message : String(err),
+            type: "invalid_request_error",
+            code: "m365_accounts_invalid",
+          },
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    }
+  }
+
   // handleChatCompletion returns a Web Response (JSON or an SSE ReadableStream
   // when stream:true). Returning it directly lets h3 forward it untouched.
   return handleChatCompletion(body, pool, {
     signal: ac.signal,
-    ensureCredentials: isPersonalMode() ? ensurePersonalCredentials : undefined,
+    accountId,
+    ensureCredentials: personal ? (id) => ensurePersonalCredentials(id) : undefined,
   });
 });

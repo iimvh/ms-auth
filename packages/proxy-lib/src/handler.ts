@@ -159,6 +159,14 @@ interface ConversationState {
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
   servedModel?: string;
+  /**
+   * The personal account whose token opened this conversation (§7.6): a
+   * conversation belongs to ONE account for its whole life. It is part of the
+   * fingerprint (so the same opener under two accounts is two conversations)
+   * and it is never changed on reuse — a thread opened on `default` must not
+   * silently continue on `work` just because the active account switched.
+   */
+  accountId: string | null;
 }
 
 /**
@@ -223,13 +231,15 @@ export class SessionPool {
 
   /**
    * Resolve the conversation state for an incoming request.
-   * Fingerprint is the hash of the first user message and the request's tool
-   * names — same opener and same tool set = same conversation.
+   * Fingerprint is the hash of the account, the first user message and the
+   * request's tool names — same account, same opener and same tool set = the
+   * same conversation. `accountId` null/undefined = the builtin layout.
    */
-  resolve(messages: ParsedMessage[], tools?: ChatBody["tools"]): ConversationState {
+  resolve(messages: ParsedMessage[], tools?: ChatBody["tools"], accountId?: string | null): ConversationState {
     this.evictStale();
 
-    const fingerprint = this.fingerprint(messages, tools);
+    const account = accountId ?? null;
+    const fingerprint = this.fingerprint(messages, tools, account);
     const existing = this.conversations.get(fingerprint);
 
     if (existing) {
@@ -269,13 +279,14 @@ export class SessionPool {
     }
 
     // New conversation
-    log.info(`New conversation ${fingerprint}, ${this.conversations.size} active`);
+    log.info(`New conversation ${fingerprint}${account ? ` account=${account}` : ""}, ${this.conversations.size} active`);
     const state: ConversationState = {
       session: new ModelSession(this.sessionOptions),
       sentMessageCount: 0,
       lastSentIsReset: false,
       pendingNote: null,
       lastAccessedAt: Date.now(),
+      accountId: account,
     };
     this.conversations.set(fingerprint, state);
     return state;
@@ -290,11 +301,42 @@ export class SessionPool {
   // which costs a thread, not the answer. Names, not definitions: descriptions
   // can carry per-turn text. The system prompt would separate the title request
   // too, but it is the likelier place for a date, a time or a git status.
-  private fingerprint(messages: ParsedMessage[], tools?: ChatBody["tools"]): string {
+  private fingerprint(messages: ParsedMessage[], tools?: ChatBody["tools"], accountId?: string | null): string {
     const firstUser = messages.find(m => m.role === "user");
     const text = firstUser ? getMessageContent(firstUser) : "";
     const toolNames = [...new Set((tools ?? []).map(t => t.function.name))].sort().join(",");
-    return simpleHash(`${toolNames}\n${text}`);
+    // The account comes FIRST: two accounts can get the same first message from
+    // the same harness (a task opened twice, a retry after switching), and that
+    // must be two M365 conversations, keyed to two different identities. The
+    // null (builtin) key is the empty string, so a single-account setup hashes
+    // exactly what it hashed before this change.
+    return simpleHash(`${accountId ?? ""}\n${toolNames}\n${text}`);
+  }
+
+  /** The accounts that still hold a conversation in this pool (null excluded). */
+  liveAccountIds(): string[] {
+    const ids = new Set<string>();
+    for (const state of this.conversations.values()) {
+      if (state.accountId !== null) ids.add(state.accountId);
+    }
+    return [...ids];
+  }
+
+  /**
+   * Forget every conversation opened on one account — used when that account is
+   * removed, so a later account that reuses the id cannot inherit a live
+   * session. Returns how many conversations were dropped.
+   */
+  forgetAccount(accountId: string): number {
+    let dropped = 0;
+    for (const [key, state] of this.conversations) {
+      if (state.accountId === accountId) {
+        this.conversations.delete(key);
+        dropped++;
+      }
+    }
+    if (dropped) log.info(`Dropped ${dropped} conversation(s) of account=${accountId}`);
+    return dropped;
   }
 
   private evictStale() {
@@ -384,9 +426,18 @@ export function formatDeltaMessages(messages: ParsedMessage[], history: ParsedMe
 export async function handleChatCompletion(
   body: ChatBody,
   pool: SessionPool,
-  opts: { signal?: AbortSignal; ensureCredentials?: () => Promise<void> } = {},
+  opts: {
+    signal?: AbortSignal;
+    /** Mint credentials for the account this request runs on (personal mode);
+     *  null = the builtin layout. */
+    ensureCredentials?: (accountId: string | null) => Promise<void>;
+    /** The personal account chosen for this request, resolved per request by
+     *  the app (see createApp's `accountId`); null/undefined = builtin. */
+    accountId?: string | null;
+  } = {},
 ): Promise<Response> {
-  const conv = pool.resolve(body.messages, body.tools);
+  const account = opts.accountId ?? null;
+  const conv = pool.resolve(body.messages, body.tools, account);
   const { session } = conv;
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
   const requestedModel = body.model;
@@ -498,7 +549,7 @@ export async function handleChatCompletion(
   // behaviour, byte for byte.
   if (opts.ensureCredentials) {
     try {
-      await opts.ensureCredentials();
+      await opts.ensureCredentials(account);
     } catch (err: any) {
       log.info(`Pre-flight failed: ${err?.message}`);
       return jsonResponse(401, {
@@ -544,7 +595,7 @@ export async function handleChatCompletion(
     // starting fresh turns into the throttle and let it self-heal (H-R1). This
     // replaced the old auto-reauth, which didn't clear the throttle and raised our
     // detection profile. A single long pi thread never trips the trigger.
-    await awaitDegradationBackoff();
+    await awaitDegradationBackoff(account);
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       // A <tool_response> the model writes after a real call is a stop sequence
       // (truncateAtFabricatedToolResponse), but the cut in produce() only runs
@@ -636,7 +687,7 @@ export async function handleChatCompletion(
       // straight back into the throttle, then a 502 blaming a content filter.
       // Fail fast with a 429 instead, and count it toward the degradation backoff.
       if (copilotStream.result?.value === "Throttled") {
-        noteRequestOutcome(true, convId);
+        noteRequestOutcome(true, convId, account);
         log.info(`Upstream Throttled (${copilotStream.result.errorCode ?? "no errorCode"}) — 429, no retry`);
         return { error: throttledResponse(copilotStream.result) };
       }
@@ -701,13 +752,13 @@ export async function handleChatCompletion(
           attempt--;
           continue;
         }
-        noteRequestOutcome(false, convId); // an answer, not a throttle
+        noteRequestOutcome(false, convId, account); // an answer, not a throttle
         log.info(`Priority access exhausted (${exhausted.window}) — resets ${exhausted.resetsAt.toISOString()}`);
         return { error: priorityAccessResponse(exhausted, model) };
       }
 
       if (copilotStream.hasContent || fullText.length > 0) {
-        noteRequestOutcome(false, convId); // clean response → degradation has lifted
+        noteRequestOutcome(false, convId, account); // clean response → degradation has lifted
         if (useToolAgent) noteAgentRouteAlive(tone); // the agent route answered on this account
         conv.servedModel = model;
         inputImages = []; // on the server now: a forcing retry in this conversation needn't resend them
@@ -820,11 +871,11 @@ export async function handleChatCompletion(
         // this is the thread-rate throttle signature (F13). Feed the degradation-
         // backoff policy — once empties span enough distinct conversations it paces
         // subsequent turns so the account can self-heal (H-R1). Never blocks this request.
-        noteRequestOutcome(true, convId);
+        noteRequestOutcome(true, convId, account);
         return { error: emptyResponseResponse(t) };
       }
     }
-    noteRequestOutcome(true, convId);
+    noteRequestOutcome(true, convId, account);
     return { error: emptyResponseResponse(null) };
   }
 

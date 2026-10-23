@@ -24,9 +24,55 @@ export {
 export { uploadImage, imageUrls, type ImageAnnotation } from "./image-input.js";
 
 export {
+  AccountError,
+  ACCOUNT_CDP_PORT,
+  ACCOUNT_ID_RE,
+  ACCOUNT_PROFILE_DIR,
+  ACCOUNT_SESSION_FILE,
+  accountIds,
+  accountKeyOf,
+  accountRegistrySource,
+  accountsDir,
+  accountsRoot,
+  accountViews,
+  activateAccount,
+  addAccount,
+  allocateAccount,
+  chathubOid,
+  chromeCommandFor,
+  clearMockRegistry,
+  configDir,
+  createMockRegistry,
+  createMockRegistryAt,
+  expandHome,
+  isSafeAccountId,
+  loginCommandFor,
+  migrateRegistry,
+  readRegistry,
+  registryProblem,
+  registryStatus,
+  removeAccount,
+  renameAccount,
+  resolveAccount,
+  useMockRegistry,
+  writeRegistry,
+  type AccountEntry,
+  type AccountId,
+  type AccountPaths,
+  type AccountRegistry,
+  type AccountView,
+  type NewAccount,
+  type RegistryRead,
+  type RegistryStatus,
+  type ResolvedAccount,
+  type ResolveAccountOptions,
+} from "./account-registry.js";
+
+export {
   noteRequestOutcome,
   awaitDegradationBackoff,
   isDegradationBackoff,
+  forgetAccountBackoff,
   createBackoffController,
   type BackoffController,
   type BackoffOptions,
@@ -123,6 +169,9 @@ export { isPersonalMode, resolveAuthMode, personalDefaultModel, personalModeDefa
 export { getPersonalToken, ensurePersonalCredentials, personalLoginCommand, PersonalAuthError, type PersonalAuthErrorCode } from "./personal-auth.js";
 export { PersonalStore, personalSessionFile, personalProfileDir, type PersonalCapture, type PersonalRecord } from "./personal-session.js";
 export { capturePersonalSession, parsePersonalCapture, isLoginUrl, frameText, hasChatFrame, PersonalCaptureError, decodeJwtExpiresAt, type PersonalCaptureErrorReason } from "./personal-capture.js";
+export { harvestPersonalToken, tokenFromSocketUrl, HarvestError, type HarvestErrorReason, type HarvestResult, type HarvestedPage } from "./personal-harvest.js";
+export { attachChatPage, personalCdpUrl } from "./personal-harvest-cdp.js";
+export { personalHealth, type PersonalHealth, type PersonalHealthDeps } from "./personal-health.js";
 export { driveSignInForm } from "./auth.js";
 
 export {
@@ -161,6 +210,7 @@ export {
   recordTurn,
   recordThrottle,
   resetTurnBudget,
+  forgetAccountBudget,
   TurnBudgetHold,
   type BudgetConfig,
   type BudgetEvent,

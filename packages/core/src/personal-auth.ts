@@ -2,8 +2,8 @@ import { capturePersonalSession, PersonalCaptureError } from "./personal-capture
 import { attachChatPage } from "./personal-harvest-cdp.js";
 import { harvestPersonalToken, isHarvestError } from "./personal-harvest.js";
 import type { PersonalCapture, PersonalRecord, PersonalRecordState } from "./personal-session.js";
-import { PersonalStore, personalProfileDir, personalSessionFile } from "./personal-session.js";
-import { resolveAccount } from "./account-registry.js";
+import { PersonalStore } from "./personal-session.js";
+import { resolveAccount, type AccountId } from "./account-registry.js";
 import { createLogger } from "./log.js";
 
 const log = createLogger("personal-auth");
@@ -34,6 +34,10 @@ export type MintStrategy = "harvest" | "capture";
 
 export interface PersonalAuthDeps {
   store: PersonalStore;
+  /** Which account this call is for; null/absent = the builtin layout. The
+   *  mint mutex and the pre-flight cache are keyed on it, so one account's
+   *  mint can never satisfy, or block, another's. */
+  accountId?: AccountId | null;
   capture: (headed: boolean) => Promise<PersonalCapture>;
   /** Absent means "no harvest available" (tests, and a deliberate capture-only
    *  mint when M365_PERSONAL_MINT_STRATEGY=capture). */
@@ -106,9 +110,11 @@ function mintRateLimitedError(kind: "interval" | "hour"): PersonalAuthError {
 }
 
 function defaultDeps(): PersonalAuthDeps {
+  const account = resolveAccount();
   return {
-    store: new PersonalStore(personalSessionFile()),
-    capture: (headed) => capturePersonalSession({ headed, profileDir: personalProfileDir() }),
+    accountId: account.id,
+    store: new PersonalStore(account.sessionFile),
+    capture: (headed) => capturePersonalSession({ headed, profileDir: account.profileDir }),
     harvest: async (prev) => {
       if (mintStrategy() !== "harvest") return null;
       const result = await harvestPersonalToken({
@@ -130,9 +136,17 @@ function mintStrategy(): MintStrategy {
   return process.env.M365_PERSONAL_MINT_STRATEGY === "capture" ? "capture" : "harvest";
 }
 
-// The mint mutex (spec §10.2/§10.5): one browser per process. Reading the
+// The mint mutex (spec §10.2/§10.5): one browser per process PER ACCOUNT.
+// Keyed, because a single mutex would queue account B behind account A's mint
+// and let an in-flight A mint answer B's request (§7.2.1). Reading the
 // store is never held behind it.
-let inflight: Promise<string> | null = null;
+const inflight = new Map<string, Promise<string>>();
+
+/** The key per-account process state is held under; the builtin layout (no
+ *  registry) is one more key, so its behaviour is today's. */
+function stateKey(accountId: AccountId | null | undefined): string {
+  return accountId ?? "builtin";
+}
 
 /** The token for personal mode: the stored one while fresh, a headless mint
  *  (then a headed one) when it is stale, and a rejected promise naming the
@@ -152,10 +166,15 @@ export async function getPersonalToken(deps?: Partial<PersonalAuthDeps>): Promis
     log.error(`the stored personal session is unusable (${state.problem}: ${state.detail}); re-minting over it`);
   }
 
-  inflight ??= mint(d, record).finally(() => {
-    inflight = null;
-  });
-  return inflight;
+  const key = stateKey(d.accountId);
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = mint(d, record).finally(() => {
+      inflight.delete(key);
+    });
+    inflight.set(key, pending);
+  }
+  return pending;
 }
 
 /** `inspect()` never throws by design; this also survives a stub store in tests
@@ -332,18 +351,50 @@ function describeCaptureError(err: unknown): string {
   return String(err);
 }
 
-/** The pre-flight `handleChatCompletion` awaits in personal mode: cached
- *  across turns so a healthy session costs nothing, and re-thrown (not
- *  cached) on failure so the 401 carries the real error each time. */
-let cachedCredentials: Promise<void> | null = null;
+/** The pre-flight `handleChatCompletion` awaits in personal mode: cached per
+ *  ACCOUNT across turns so a healthy session costs nothing, and re-thrown (not
+ *  cached) on failure so the 401 carries the real error each time — an
+ *  exhausted account A must not poison B, and a switch must not hand B A's
+ *  already-resolved answer. */
+const cachedCredentials = new Map<string, Promise<void>>();
 
-export function ensurePersonalCredentials(): Promise<void> {
-  cachedCredentials ??= getPersonalToken().then(
+/** `deps` is for tests; production callers pass only the account. Note the
+ *  test seam: when `deps.getToken` is given it is the whole token call (a test
+ *  that wants the real `getPersonalToken` drives it from a stale record). */
+export function ensurePersonalCredentials(
+  accountId?: AccountId | null,
+  deps?: Partial<PersonalAuthDeps> & { getToken?: () => Promise<string> },
+): Promise<void> {
+  const key = stateKey(accountId);
+  const cached = cachedCredentials.get(key);
+  if (cached) return cached;
+  const token = deps?.getToken
+    ? deps.getToken()
+    : getPersonalToken({
+        store: new PersonalStore(resolveAccount({ id: accountId ?? null }).sessionFile),
+        ...deps,
+        accountId: accountId ?? deps?.accountId ?? null,
+      });
+  const pending = token.then(
     () => undefined,
     (err) => {
-      cachedCredentials = null;
+      cachedCredentials.delete(key);
       throw err;
     },
   );
-  return cachedCredentials;
+  cachedCredentials.set(key, pending);
+  return pending;
+}
+
+/** Drop one account's mint state (its mutex slot and its pre-flight cache), or
+ *  every account's when no id is given. For tests, and for `removeAccount`. */
+export function resetPersonalAuthState(accountId?: AccountId | null): void {
+  if (accountId === undefined) {
+    inflight.clear();
+    cachedCredentials.clear();
+    return;
+  }
+  const key = stateKey(accountId);
+  inflight.delete(key);
+  cachedCredentials.delete(key);
 }

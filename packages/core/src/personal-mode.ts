@@ -1,5 +1,6 @@
 import type { PersonalRecord } from "./personal-session.js";
-import { PersonalStore, personalSessionFile } from "./personal-session.js";
+import { PersonalStore } from "./personal-session.js";
+import { resolveAccount } from "./account-registry.js";
 
 export type AuthMode = "msal" | "personal";
 
@@ -46,7 +47,7 @@ export function personalDefaultModel(
 ): string | null {
   if (process.env.M365_PERSONAL_MODEL) return process.env.M365_PERSONAL_MODEL;
   const stored: { model: string; ok: boolean; at: number } | null = probe
-    ?? (new PersonalStore(personalSessionFile()).read() as PersonalRecord | null)?.probe
+    ?? (new PersonalStore(resolveAccount().sessionFile).read() as PersonalRecord | null)?.probe
     ?? null;
   if (stored && stored.ok) return stored.model;
   return null;

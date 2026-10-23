@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isPersonalMode, personalDefaultModel, personalModeDefaults, resolveAuthMode, shouldSendCodeInterpreter } from "./personal-mode.js";
 import { PersonalStore } from "./personal-session.js";
+import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,5 +72,36 @@ describe("personal defaults", () => {
       emailHint: null, probe: bad, mintCount: 1, lastMintAt: 0, expiresAt: 1, capturedAt: 0,
     });
     expect(personalDefaultModel()).toBeNull();
+  });
+});
+
+describe("personalDefaultModel follows the active account", () => {
+  it("reads the ACTIVE account's probe after a switch", () => {
+    delete process.env.M365_PERSONAL_MODEL;
+    delete process.env.M365_PERSONAL_SESSION_FILE; // beforeAll points it at a scratch file; the registry must win
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
+    const rec = (model: string) => ({ accessToken: "t", chathubPath: "o@t", scenario: "S", variants: "v",
+      licenseType: "Free", agentHost: "h", product: null, source: "officeweb", optionsSets: [],
+      allowedMessageTypes: ["Chat"], emailHint: null, probe: { model, ok: true, at: 1 },
+      mintCount: 1, lastMintAt: 0, expiresAt: 1, capturedAt: 0 });
+    new PersonalStore(join(accountsDir(), "default", "session.json")).write(rec("claude-sonnet"));
+    new PersonalStore(join(accountsDir(), "work", "session.json")).write(rec("gpt-5.5"));
+    expect(personalDefaultModel()).toBe("claude-sonnet");
+    activateAccount("work");
+    expect(personalDefaultModel()).toBe("gpt-5.5");
+    clearMockRegistry();
+  });
+
+  it("M365_PERSONAL_MODEL still wins over the active account's probe", () => {
+    useMockRegistry([{ id: "work", hasSession: true }]);
+    new PersonalStore(join(accountsDir(), "work", "session.json")).write({
+      accessToken: "t", chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
+      agentHost: "h", product: null, source: "officeweb", optionsSets: [], allowedMessageTypes: ["Chat"],
+      emailHint: null, probe: { model: "gpt-5.5", ok: true, at: 1 }, mintCount: 1, lastMintAt: 0,
+      expiresAt: 1, capturedAt: 0 });
+    process.env.M365_PERSONAL_MODEL = "claude-sonnet";
+    delete process.env.M365_PERSONAL_SESSION_FILE;
+    expect(personalDefaultModel()).toBe("claude-sonnet");
+    clearMockRegistry();
   });
 });

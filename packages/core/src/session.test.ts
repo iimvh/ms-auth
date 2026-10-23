@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { buildCopilotWebSocketHeaders, buildCopilotWebSocketUrl, cursorMessageId, foldStreamText, TurnTextComposer } from "./session.js";
+import { buildCopilotWebSocketHeaders, buildCopilotWebSocketUrl, cursorMessageId, foldStreamText, readPersonalRecord, TurnTextComposer } from "./session.js";
+import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
+import { PersonalStore } from "./personal-session.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MessageUpdate } from "./schemas.js";
 
 /** Replay a sequence of raw M365 frames (deltas as {d}, snapshots as {s}) through
@@ -283,5 +288,49 @@ describe("personal websocket headers (F103)", () => {
   });
   it("the enterprise headers still say Firefox (unchanged)", () => {
     expect(buildCopilotWebSocketHeaders("c")["User-Agent"]).toContain("Firefox");
+  });
+});
+
+describe("a personal failure names the account (Task 8)", () => {
+  afterEach(() => { clearMockRegistry(); delete process.env.M365_ACCOUNT_HOME; });
+
+  it("a missing record names the account and its own login command", () => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
+    activateAccount("work");
+    let err: { code?: string; message: string } | null = null;
+    try { readPersonalRecord(); } catch (e) { err = e as { code?: string; message: string }; }
+    expect(err).not.toBeNull();
+    expect(err!.message).toContain('account "work"');
+    expect(err!.message).toContain("pnpm m365-personal login --account work");
+    expect(err!.message).toContain("no session record");
+  });
+
+  it("a corrupt record says so instead of a flat session_dead", () => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
+    activateAccount("work");
+    const f = join(accountsDir(), "work", "session.json");
+    writeFileSync(f, "{ not json"); // a record IS there, but cannot be used
+    let msg = "";
+    try { readPersonalRecord(); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain('account "work"');
+    expect(msg).toContain("unusable");
+    expect(msg).toContain("invalid_json");
+  });
+
+  it("an expired record names the account", () => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
+    activateAccount("work");
+    new PersonalStore(join(accountsDir(), "work", "session.json")).write({
+      accessToken: "t", chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
+      agentHost: "h", product: null, source: "officeweb", optionsSets: [], allowedMessageTypes: ["Chat"],
+      emailHint: null, probe: null, mintCount: 1, lastMintAt: 0, expiresAt: Date.now() - 1000,
+      capturedAt: Date.now() - 7_200_000 });
+    let msg = "";
+    try { readPersonalRecord(); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain('account "work"');
+    expect(msg).toContain("expired");
   });
 });

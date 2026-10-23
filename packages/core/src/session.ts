@@ -30,7 +30,7 @@ import { isPersonalMode, shouldSendCodeInterpreter } from "./personal-mode.js";
 import { PersonalAuthError, personalLoginCommand } from "./personal-auth.js";
 import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
 import { PersonalStore, personalSessionFile } from "./personal-session.js";
-import { resolveAccount } from "./account-registry.js";
+import { loginCommandFor, resolveAccount } from "./account-registry.js";
 
 const RS = "\x1E";
 const log = createLogger("session");
@@ -309,16 +309,30 @@ export function buildPersonalChathubUrl(
   return `wss://substrate.office.com/m365Copilot/Chathub/${capture.chathubPath}?${params}`;
 }
 
-/** The record backing a personal turn. The pre-flight (Task 7 /
- *  ensurePersonalCredentials) guarantees one exists; if it still does not —
- *  or is corrupt — fail with the same "run login" error, not a mystery 401. */
+/** The record backing a personal turn. The pre-flight (ensurePersonalCredentials)
+ *  guarantees one exists; if it still does not — or is corrupt, or has expired —
+ *  fail with an error that names WHICH account and why, not a mystery 401 and
+ *  not a flat `session_dead` (§7.5). With several accounts, "which one" is the
+ *  first thing the operator needs. */
 export function readPersonalRecord(): PersonalRecord {
-  const store = new PersonalStore(personalSessionFile());
-  const record = store.read();
-  if (!record) {
+  const account = resolveAccount();
+  const whose = account.id ? `account "${account.id}"` : "the personal account";
+  const login = account.id ? loginCommandFor(account.id) : personalLoginCommand();
+  const store = new PersonalStore(account.sessionFile);
+  const state = store.inspect();
+  if (!state.ok) {
+    const why =
+      state.problem === "absent"
+        ? `no session record at ${account.sessionFile}`
+        : `its session record is unusable (${state.problem}: ${state.detail}) — delete ${account.sessionFile} (or pnpm m365-personal logout${account.id ? ` --account ${account.id}` : ""}) and run: ${login}`;
+    throw new PersonalAuthError("session_dead", `M365 personal session expired for ${whose} — ${why}${state.problem === "absent" ? `; run: ${login}` : ""}`);
+  }
+  const record = state.record;
+  if (!store.isFresh(record)) {
+    const expired = new Date(record.expiresAt).toISOString();
     throw new PersonalAuthError(
       "session_dead",
-      `M365 personal session expired — run: ${personalLoginCommand()}`,
+      `M365 personal session expired for ${whose} — the record expired at ${expired}; run: ${login} (or wait for the next request to re-mint it from that account's Chrome)`,
     );
   }
   return record;

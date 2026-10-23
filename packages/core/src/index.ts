@@ -171,7 +171,7 @@ export { PersonalStore, personalSessionFile, personalProfileDir, type PersonalCa
 export { capturePersonalSession, parsePersonalCapture, isLoginUrl, frameText, hasChatFrame, PersonalCaptureError, decodeJwtExpiresAt, type PersonalCaptureErrorReason } from "./personal-capture.js";
 export { harvestPersonalToken, tokenFromSocketUrl, HarvestError, type HarvestErrorReason, type HarvestResult, type HarvestedPage } from "./personal-harvest.js";
 export { attachChatPage, personalCdpUrl } from "./personal-harvest-cdp.js";
-export { personalHealth, type PersonalHealth, type PersonalHealthDeps } from "./personal-health.js";
+export { personalHealth, probeCdpReachable, type PersonalHealth, type PersonalHealthDeps } from "./personal-health.js";
 export { driveSignInForm } from "./auth.js";
 
 export {

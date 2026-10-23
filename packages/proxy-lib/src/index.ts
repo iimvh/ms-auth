@@ -4,6 +4,20 @@ import { SessionPool, handleChatCompletion } from "./handler.js";
 
 export { SessionPool, handleChatCompletion } from "./handler.js";
 export { buildHealthzPayload, type HealthzPayload } from "./healthz.js";
+export {
+  accountsActivateResponse,
+  accountsAddResponse,
+  accountsDeleteResponse,
+  accountsListResponse,
+  accountsRenameResponse,
+  listAccounts,
+  resetAccountsHealthCache,
+  toRouteResult,
+  type AccountHealthView,
+  type AccountsDeps,
+  type AccountsListBody,
+  type RouteResult,
+} from "./accounts-api.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 
 // Re-export tool utilities from core

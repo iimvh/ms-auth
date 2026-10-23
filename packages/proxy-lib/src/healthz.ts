@@ -22,12 +22,16 @@ export interface HealthzPayload {
   };
 }
 
-export async function buildHealthzPayload(): Promise<HealthzPayload> {
+export async function buildHealthzPayload(deps: { probeCdp?: (url: string) => Promise<boolean> } = {}): Promise<HealthzPayload> {
   const accounts = safeRegistryStatus();
   if (!isPersonalMode()) {
     return { status: "ok", authMode: "msal", credential: { applicable: false }, accounts };
   }
-  return { status: "ok", authMode: "personal", credential: await personalHealth(), accounts };
+  // `undefined` must not be passed over the defaults: personalHealth merges its
+  // partial into them, so an explicit probeCdp: undefined would erase the real
+  // probe and throw on the first request.
+  const health = await personalHealth(deps.probeCdp ? { probeCdp: deps.probeCdp } : {});
+  return { status: "ok", authMode: "personal", credential: health, accounts };
 }
 
 /** The registry's view, degrading to a readable report instead of throwing. */

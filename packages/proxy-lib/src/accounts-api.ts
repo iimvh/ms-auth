@@ -34,6 +34,9 @@ export interface AccountHealthView extends AccountView {
   credential: PersonalHealth | null;
   /** Set when the account shares an identity with another one (one budget). */
   warning: string | null;
+  /** A conversation opened on this account is still in the pool (so it cannot
+   *  be deleted yet, and the dashboard shows why). */
+  accountIdLive: boolean;
 }
 
 export interface AccountsDeps {
@@ -94,15 +97,16 @@ async function healthOf(accountId: string, deps: AccountsDeps): Promise<Personal
 
 // --- Helpers ---
 
+/** Whether that account is serving a conversation right now. */
+export function isAccountLive(deps: AccountsDeps, id: string): boolean {
+  return deps.pool.liveAccountIds().includes(id);
+}
+
 function errorBody(code: string, message: string, hint?: string, extra?: Record<string, unknown>): RouteResult["body"] {
   return { error: { code, message, ...(hint ? { hint } : {}), ...extra } };
 }
 
 /** `true` while any conversation of that account is still in the pool. */
-function isBusy(deps: AccountsDeps, id: string): boolean {
-  return deps.pool.liveAccountIds().includes(id);
-}
-
 function labelProblem(label: unknown): string | null {
   if (typeof label !== "string") return "label must be a string";
   if (!label.trim()) return "label must not be empty";
@@ -136,7 +140,12 @@ export async function listAccounts(deps: AccountsDeps): Promise<AccountsListBody
   const views = accountViews();
   const accounts: AccountHealthView[] = [];
   for (const view of views) {
-    accounts.push({ ...view, credential: await healthOf(view.id, deps), warning: view.warning });
+    accounts.push({
+      ...view,
+      credential: await healthOf(view.id, deps),
+      warning: view.warning,
+      accountIdLive: isAccountLive(deps, view.id),
+    });
   }
   return { registry: registryStatus(), accounts };
 }
@@ -202,7 +211,7 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
   // Before touching the registry: a conversation opened on this account cannot
   // be re-keyed onto another identity, and removing the entry would strand it.
   // The operator continues or abandons the thread first (from /accounts/ui).
-  if (isBusy(deps, id)) {
+  if (isAccountLive(deps, id)) {
     return {
       result: {
         status: 409,

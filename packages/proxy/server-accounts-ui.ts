@@ -1,0 +1,260 @@
+/**
+ * The accounts dashboard (§7.5), served at GET /accounts/ui.
+ *
+ * One static page, inline CSS and JS, no framework and no build step: it ships
+ * as a template literal because inside Nitro's build neither the working
+ * directory nor the bundled route's location is dependable, and a `readFileSync`
+ * there is a 404 waiting for a different launch directory. It talks ONLY to the
+ * five /accounts routes (relative URLs, same origin — no CORS), and every value
+ * it renders that came from the server goes through `esc()`.
+ */
+export const ACCOUNTS_UI_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M365 accounts</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { opacity: .7; margin: 0 0 20px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(128,128,128,.3); vertical-align: top; }
+  th { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; opacity: .7; }
+  tr.active td { background: rgba(64,160,96,.10); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .ok { background: #1e7d43; color: #fff; }
+  .stale { background: #a86a00; color: #fff; }
+  .at_risk { background: #a83f00; color: #fff; }
+  .corrupt { background: #a40020; color: #fff; }
+  .unknown { background: #555; color: #fff; }
+  .warn { color: #a83f00; font-weight: 600; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; }
+  pre { background: rgba(128,128,128,.12); padding: 10px; overflow-x: auto; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+  button { font: inherit; padding: 3px 10px; margin: 0 4px 4px 0; cursor: pointer; border-radius: 6px; border: 1px solid rgba(128,128,128,.5); background: transparent; }
+  button:hover { background: rgba(128,128,128,.15); }
+  input[type=text] { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(128,128,128,.5); background: transparent; }
+  form.add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+  #msg { min-height: 1.4em; margin: 12px 0; }
+  #msg.err { color: #b00; font-weight: 600; }
+  #msg.info { color: #1e7d43; }
+  .muted { opacity: .65; font-size: 12.5px; }
+  footer { margin-top: 24px; max-width: 80ch; }
+</style>
+</head>
+<body>
+<h1>M365 accounts</h1>
+<p class="sub">Active account: <strong id="active">…</strong> · <span id="count" class="muted"></span></p>
+
+<div id="msg"></div>
+
+<table>
+  <thead>
+    <tr><th>On</th><th>Account</th><th>Status</th><th>Expires</th><th>Chrome (CDP)</th><th>Identity</th><th></th></tr>
+  </thead>
+  <tbody id="rows"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+</table>
+
+<form class="add" id="addForm">
+  <input type="text" id="newId" placeholder="id (a-z0-9, dashes)" required pattern="[a-z0-9][a-z0-9-]{0,31}">
+  <input type="text" id="newLabel" placeholder="label, e.g. Work (free)" required>
+  <button type="submit">Add account</button>
+</form>
+
+<pre id="newOut" hidden></pre>
+
+<footer>
+  <p class="muted">A green row means the session record is fresh and Chrome answered — the proxy cannot see how many turns the account has left today. If one runs out, it fails alone: switch manually.</p>
+  <p class="muted">The active account is chosen per request: a switch applies to the next request. A thread already running keeps the account it was opened on.</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var POLL_MS = 15000;
+  var CAPTURE_REDIRECT = "https://m365.cloud.microsoft/chat";
+
+  function esc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function say(text, kind) {
+    var el = document.getElementById("msg");
+    el.textContent = text || "";
+    el.className = kind || "";
+  }
+
+  function minutes(ms) {
+    if (ms == null) return "no record";
+    var m = Math.round(ms / 60000);
+    if (m >= 0) return "in " + m + " min";
+    return "OVERDUE by " + Math.abs(m) + " min";
+  }
+
+  async function api(method, path, body) {
+    var res = await fetch(path, {
+      method: method,
+      headers: body ? { "content-type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    var payload = null;
+    try { payload = await res.json(); } catch (e) { payload = null; }
+    if (!res.ok) {
+      var err = payload && payload.error ? payload.error : {};
+      throw new Error((err.message || ("HTTP " + res.status)) + (err.hint ? " — " + err.hint : ""));
+    }
+    return payload;
+  }
+
+  // A conversation of this account is in the pool: deleting it would 409.\n  function liveBadge(a) {\n    return a.accountIdLive ? ' <div class="muted">live conversation</div>': "";\n  }\n\n  function statusPill(credential) {
+    if (!credential) return '<span class="pill unknown">unknown</span>';
+    var s = String(credential.status);
+    return '<span class="pill ' + esc(s) + '">' + esc(s) + "</span>";
+  }
+
+  function render(data) {
+    var active = document.getElementById("active");
+    var count = document.getElementById("count");
+    active.textContent = data.registry && data.registry.activeId ? data.registry.activeId : "(none)";
+    count.textContent = (data.registry ? data.registry.count : data.accounts.length) + " account(s) · " +
+      (data.registry && data.registry.repository === "builtin" ? "no registry file (builtin layout)" : (data.registry ? data.registry.path : ""));
+    if (data.registry && data.registry.problem) {
+      say("Registry problem (" + data.registry.problem.code + "): " + data.registry.problem.detail + " — " + data.registry.problem.hint, "err");
+    }
+
+    var rows = document.getElementById("rows");
+    if (!data.accounts.length) {
+      rows.innerHTML = '<tr><td colspan="7" class="muted">No accounts yet.</td></tr>';
+      return;
+    }
+    rows.innerHTML = data.accounts.map(function (a) {
+      var c = a.credential || {};
+      var busy = c.cdpReachable ? "reachable" : "not reachable";
+      var chrome = "port " + esc(a.cdpPort) + " · " + busy +
+        (a.profileExists ? "" : ' · <span class="warn">no profile yet</span>');
+      var identity = a.oid ? esc(a.oid) : '<span class="muted">no record</span>';
+      if (a.oidCollisionWith && a.oidCollisionWith.length) {
+        identity += ' <span class="warn">shares an identity with ' + esc(a.oidCollisionWith.join(", ")) + "</span>";
+      }
+      if (a.warning) identity += '<div class="warn">' + esc(a.warning) + "</div>";
+      if (c.hint) identity += '<div class="muted">' + esc(c.hint) + "</div>";
+      var rowClasses = [];
+      if (a.active) rowClasses.push("active");
+      if (a.accountIdLive) rowClasses.push("live");
+      var idAttr = esc(a.id);
+      return '<tr class="' + rowClasses.join(" ") + '" data-id="' + idAttr + '">' +
+        '<td><input type="radio" name="active" value="' + idAttr + '"' + (a.active ? " checked" : "") +
+          ' aria-label="make active"' + (a.active ? " disabled" : "") + "></td>" +
+        "<td><strong>" + esc(a.label) + "</strong>" + (a.accountIdLive ? ' <span class="muted">(live)</span>' : "") +
+          '<div class="muted">' + idAttr + "</div></td>" +
+        "<td>" + statusPill(a.credential) + liveBadge(a) + "</td>" +
+        '<td data-expires="' + esc(c.expiresInMs) + '">' + esc(minutes(c.expiresInMs)) + "</td>" +
+        "<td>" + chrome + "</td>" +
+        "<td>" + identity + "</td>" +
+        "<td>" +
+          '<button data-act="rename" data-id="' + idAttr + '">Rename</button>' +
+          '<button data-act="copy-login" data-id="' + idAttr + '">Copy login command</button>' +
+          '<button data-act="delete" data-id="' + idAttr + '">Remove</button>' +
+        "</td>" +
+      "</tr>";
+    }).join("");
+    wire();
+  }
+
+  async function refresh() {
+    try {
+      var data = await api("GET", "/accounts");
+      render(data);
+    } catch (e) {
+      say(e.message, "err");
+    }
+  }
+
+  function loginCommand(id) {
+    return "pnpm m365-personal login --account " + id;
+  }
+
+  async function copy(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      say("Copied: " + text, "info");
+    } catch (e) {
+      say("Copy failed — the command is: " + text, "err");
+    }
+  }
+
+  function wire() {
+    document.querySelectorAll("input[name=active]").forEach(function (el) {
+      el.addEventListener("change", async function () {
+        if (!el.checked) return;
+        try {
+          await api("POST", "/accounts/" + encodeURIComponent(el.value) + "/activate");
+          say('Active account is now "' + el.value + '". New requests use it; a running thread keeps its own account.', "info");
+        } catch (e) {
+          say(e.message, "err");
+        }
+        refresh();
+      });
+    });
+    document.querySelectorAll("button[data-act]").forEach(function (el) {
+      el.addEventListener("click", async function () {
+        var id = el.getAttribute("data-id");
+        var act = el.getAttribute("data-act");
+        try {
+          if (act === "copy-login") {
+            await copy(loginCommand(id));
+            return;
+          }
+          if (act === "rename") {
+            var label = window.prompt('New label for "' + id + '":');
+            if (label == null) return;
+            await api("PATCH", "/accounts/" + encodeURIComponent(id), { label: label });
+            say('Renamed "' + id + '".', "info");
+          } else if (act === "delete") {
+            if (!window.confirm('Remove account "' + id + '"? Its files move to .trash/ and it stops being usable.')) return;
+            var r = await api("DELETE", "/accounts/" + encodeURIComponent(id));
+            say('Removed "' + id + '" (' + (r && r.forgotten ? r.forgotten + " conversation(s) forgotten" : "no live conversations") + ").", "info");
+          }
+        } catch (e) {
+          say(e.message, "err");
+        }
+        refresh();
+      });
+    });
+  }
+
+  document.getElementById("addForm").addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    var id = document.getElementById("newId").value.trim();
+    var label = document.getElementById("newLabel").value.trim();
+    var out = document.getElementById("newOut");
+    try {
+      var r = await api("POST", "/accounts", { id: id, label: label });
+      var lines = [
+        "1. Start that account's Chrome (sign in to Microsoft 365 in it):",
+        "   " + r.chromeCommand,
+        "",
+        "2. Capture its session:",
+        "   " + r.loginCommand,
+      ];
+      if (r.warning) lines.push("", "Note: " + r.warning);
+      out.textContent = lines.join("\\n");
+      out.hidden = false;
+      document.getElementById("addForm").reset();
+      say('Added "' + id + '".', "info");
+      refresh();
+    } catch (e) {
+      say(e.message, "err");
+    }
+  });
+
+  refresh();
+  setInterval(refresh, POLL_MS);
+})();
+</script>
+</body>
+</html>
+`;

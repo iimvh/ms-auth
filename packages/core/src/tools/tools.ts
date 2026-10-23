@@ -1,4 +1,4 @@
-import { createLogger } from "./log.js";
+import { createLogger } from "../io/log.js";
 import {
   buildSpecMap,
   currentFramingVariant,
@@ -8,7 +8,7 @@ import {
   parseFencedToolCalls,
   renderFencedCall,
   transcriptStyleForVariant,
-} from "./fenced.js";
+} from "../framing/fenced.js";
 
 const log = createLogger("tools");
 

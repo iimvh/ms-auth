@@ -21,9 +21,9 @@ export {
   type ImageOrientation,
   type ImageStyle,
   type ImageGenFailureReason,
-} from "./image.js";
+} from "./io/image.js";
 
-export { uploadImage, imageUrls, type ImageAnnotation } from "./image-input.js";
+export { uploadImage, imageUrls, type ImageAnnotation } from "./io/image-input.js";
 
 export {
   AccountError,
@@ -78,9 +78,9 @@ export {
   createBackoffController,
   type BackoffController,
   type BackoffOptions,
-} from "./auth-recovery.js";
+} from "./budget/auth-recovery.js";
 
-export { getOrCreateAgent, getEnvironmentUrl, environmentUrlFromName } from "./agent.js";
+export { getOrCreateAgent, getEnvironmentUrl, environmentUrlFromName } from "./io/agent.js";
 
 export {
   decodeJwt,
@@ -111,7 +111,7 @@ export {
   type ScenarioRouting,
   type CopilotStream,
   type CapturedImage,
-} from "./copilot.js";
+} from "./routing/copilot.js";
 
 export {
   parsePriorityAccessExhaustion,
@@ -127,7 +127,7 @@ export {
   type MeteredBudget,
   type PriorityAccessExhaustion,
   type PriorityAccessWindow,
-} from "./priority-access.js";
+} from "./budget/priority-access.js";
 
 export {
   currentFramingVariant,
@@ -137,19 +137,23 @@ export {
   FRAMING_VARIANT_NAMES,
   longHeredocAsWrite,
   type TranscriptStyle,
-} from "./fenced.js";
+} from "./framing/fenced.js";
 
 export {
   CopilotSession,
   type CopilotSessionOptions,
   type ChatTurnOptions,
   type NativeActionConfig,
+} from "./protocol/session.js";
+
+export {
   personalTurnParams,
   buildPersonalChathubUrl,
   readPersonalRecord,
   buildPersonalWebSocketHeaders,
-  probePersonalCapture,
-} from "./session.js";
+} from "./personal-chathub/chathub.js";
+
+export { probePersonalCapture } from "./personal-chathub/probe.js";
 
 export type { TurnContext, CredentialSource, SessionStore } from "./turn-context.js";
 
@@ -162,12 +166,12 @@ export {
   ACTION_ALLOWED_MESSAGE_TYPES,
   ACTION_CONFIRM_MESSAGE_TYPES,
   type ActionConfirmation,
-} from "./native-actions.js";
+} from "./tools/native-actions.js";
 
 export {
   ModelSession,
   type ModelSessionOptions,
-} from "./model.js";
+} from "./app/model.js";
 
 export { isPersonalMode, resolveAuthMode, personalDefaultModel, personalModeDefaults, shouldSendCodeInterpreter, type AuthMode } from "./adapters/personal/personal-mode.js";
 export { getPersonalToken, ensurePersonalCredentials, personalLoginCommand, PersonalAuthError, PERSONAL_AUTH_ERROR_CODES, type PersonalAuthErrorCode } from "./adapters/personal/personal-auth.js";
@@ -199,9 +203,9 @@ export {
   type ToolChoice,
   type ParsedToolCall,
   type ParseResult,
-} from "./tools.js";
+} from "./tools/tools.js";
 
-export { createLogger, trunc, LOG_PATH, FRAME_DIR, fileLoggingEnabled } from "./log.js";
+export { createLogger, trunc, LOG_PATH, FRAME_DIR, fileLoggingEnabled } from "./io/log.js";
 export {
   budgetConfig,
   parseEvents,
@@ -222,4 +226,4 @@ export {
   type BudgetState,
   type BudgetDecision,
   type AwaitTurnBudgetOptions,
-} from "./turn-budget.js";
+} from "./budget/turn-budget.js";

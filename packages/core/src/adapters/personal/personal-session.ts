@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { dirname } from "node:path";
 import { z } from "zod/v4";
 import { resolveAccount } from "../../account-registry.js";
-import { createLogger } from "../../log.js";
+import { createLogger } from "../../io/log.js";
 
 const log = createLogger("personal-session");
 

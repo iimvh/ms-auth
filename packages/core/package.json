@@ -15,10 +15,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown src/index.ts src/personal-cli.ts --format esm --dts"
+    "build": "tsdown src/index.ts src/app/personal-cli.ts --format esm --dts"
   },
   "bin": {
-    "m365-personal": "./dist/personal-cli.mjs"
+    "m365-personal": "./dist/app/personal-cli.mjs"
   },
   "dependencies": {
     "@azure/msal-node": "^5.1.1",

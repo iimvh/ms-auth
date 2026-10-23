@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createLogger } from "./log.js";
-import type { Message } from "./tools.js";
+import type { Message } from "../tools/tools.js";
 
 const log = createLogger("image-input");
 

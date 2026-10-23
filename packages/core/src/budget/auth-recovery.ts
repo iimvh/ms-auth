@@ -1,4 +1,4 @@
-import { createLogger } from "./log.js";
+import { createLogger } from "../io/log.js";
 
 const log = createLogger("backoff");
 

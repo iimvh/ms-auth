@@ -33,7 +33,7 @@ export function getImageArtifactToken(): Promise<string | null> {
   return getTokenForScope(IMAGE_ARTIFACT_SCOPES);
 }
 
-import { createLogger } from "../../log.js";
+import { createLogger } from "../../io/log.js";
 import { z } from "zod/v4";
 const log = createLogger("auth");
 

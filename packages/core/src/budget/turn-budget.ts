@@ -1,7 +1,7 @@
 import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { createLogger, fileLoggingEnabled, LOG_PATH } from "./log.js";
+import { createLogger, fileLoggingEnabled, LOG_PATH } from "../io/log.js";
 
 const log = createLogger("turn-budget");
 

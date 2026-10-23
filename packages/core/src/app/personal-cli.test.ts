@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runPersonalCli } from "./personal-cli.js";
-import { PersonalStore } from "./adapters/personal/personal-session.js";
-import { accountsDir, activateAccount, clearMockRegistry, configDir, useMockRegistry } from "./account-registry.js";
+import { PersonalStore } from "../adapters/personal/personal-session.js";
+import { accountsDir, activateAccount, clearMockRegistry, configDir, useMockRegistry } from "../account-registry.js";
 
 const capture = {
   accessToken: "secret-token", chathubPath: "oid@tid", scenario: "OfficeWebPaidConsumerCopilot",

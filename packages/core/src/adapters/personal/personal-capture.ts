@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import { resolveAccount } from "../../account-registry.js";
-import { createLogger } from "../../log.js";
+import { createLogger } from "../../io/log.js";
 import type { PersonalCapture } from "./personal-session.js";
 
 const log = createLogger("personal-capture");

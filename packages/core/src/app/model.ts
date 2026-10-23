@@ -1,12 +1,12 @@
-import { getToken } from "./adapters/msal/auth.js";
-import { getPersonalToken } from "./adapters/personal/personal-auth.js";
-import { isPersonalMode } from "./adapters/personal/personal-mode.js";
-import { getOrCreateAgent } from "./agent.js";
-import { CopilotSession } from "./session.js";
-import { uploadImage, type ImageAnnotation } from "./image-input.js";
-import { createLogger, trunc } from "./log.js";
-import { awaitTurnBudget } from "./turn-budget.js";
-import type { CopilotStream } from "./copilot.js";
+import { getToken } from "../adapters/msal/auth.js";
+import { getPersonalToken } from "../adapters/personal/personal-auth.js";
+import { isPersonalMode } from "../adapters/personal/personal-mode.js";
+import { getOrCreateAgent } from "../io/agent.js";
+import { CopilotSession } from "../protocol/session.js";
+import { uploadImage, type ImageAnnotation } from "../io/image-input.js";
+import { createLogger, trunc } from "../io/log.js";
+import { awaitTurnBudget } from "../budget/turn-budget.js";
+import type { CopilotStream } from "../routing/copilot.js";
 
 const log = createLogger("model");
 

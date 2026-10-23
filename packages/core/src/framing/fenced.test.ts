@@ -16,7 +16,7 @@ import {
   defaultFramingForModel,
   transcriptStyleForVariant,
 } from "./fenced.js";
-import type { ToolDef } from "./tools.js";
+import type { ToolDef } from "../tools/tools.js";
 
 const bash: ToolDef = {
   type: "function",

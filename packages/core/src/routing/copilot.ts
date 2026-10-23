@@ -1,5 +1,5 @@
-import { JwtClaims } from "./schemas.js";
-import type { MeteredBudget } from "./priority-access.js";
+import { JwtClaims } from "../protocol/schemas.js";
+import type { MeteredBudget } from "../budget/priority-access.js";
 
 // Model name → tone mapping.
 // The server VALIDATES tones (an unknown tone errors with "Failed to invoke

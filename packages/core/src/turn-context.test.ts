@@ -31,10 +31,10 @@ vi.mock("./account-registry.js", async (importOriginal) =>
 vi.mock("./adapters/personal/personal-mode.js", async (importOriginal) =>
   seams.wrap("personal-mode", await importOriginal<Record<string, unknown>>()));
 
-vi.mock("ws", async () => ({ default: (await import("./socket-fixture.js")).RecordingWebSocket }));
+vi.mock("ws", async () => ({ default: (await import("./protocol/socket-fixture.js")).RecordingWebSocket }));
 
-const { recording, handshake, botText } = await import("./socket-fixture.js");
-const { CopilotSession } = await import("./session.js");
+const { recording, handshake, botText } = await import("./protocol/socket-fixture.js");
+const { CopilotSession } = await import("./protocol/session.js");
 
 const CONTEXT: TurnContext = {
   token: "jwe-token",

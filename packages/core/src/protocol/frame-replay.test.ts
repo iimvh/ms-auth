@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { fileURLToPath } from "node:url";
-import type { TurnContext } from "./turn-context.js";
+import type { TurnContext } from "../turn-context.js";
 
-vi.mock("./personal-harvest-cdp.js", () => ({ attachChatPage: () => Promise.reject(new Error("no browser")) }));
-vi.mock("./personal-auth.js", () => ({
+vi.mock("../adapters/personal/personal-harvest-cdp.js", () => ({ attachChatPage: () => Promise.reject(new Error("no browser")) }));
+vi.mock("../adapters/personal/personal-auth.js", () => ({
   PersonalAuthError: class PersonalAuthError extends Error {},
   personalLoginCommand: () => "pnpm m365-personal login",
 }));
@@ -14,7 +14,7 @@ const { recording, replayFeed } = await import("./socket-fixture.js");
 const { readFrameFixture } = await import("./frame-replay.js");
 const { CopilotSession } = await import("./session.js");
 
-const FIXTURE = fileURLToPath(new URL("../fixtures/replay/synthetic-complete-turn.ndjson", import.meta.url));
+const FIXTURE = fileURLToPath(new URL("../../fixtures/replay/synthetic-complete-turn.ndjson", import.meta.url));
 
 const CONTEXT: TurnContext = {
   token: "jwe-token",

@@ -9,11 +9,11 @@
 //
 // Full protocol write-up: docs/hypotheses.md §14.
 
-import { getToken, getImageArtifactToken } from "./adapters/msal/auth.js";
-import { CopilotSession } from "./session.js";
+import { getToken, getImageArtifactToken } from "../adapters/msal/auth.js";
+import { CopilotSession } from "../protocol/session.js";
 import { createLogger, trunc } from "./log.js";
-import { awaitTurnBudget } from "./turn-budget.js";
-import type { CapturedImage } from "./copilot.js";
+import { awaitTurnBudget } from "../budget/turn-budget.js";
+import type { CapturedImage } from "../routing/copilot.js";
 
 const log = createLogger("image");
 

@@ -2,7 +2,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { PersonalStore, stripBom } from "./adapters/personal/personal-session.js";
-import { createLogger } from "./log.js";
+import { createLogger } from "./io/log.js";
 
 const log = createLogger("accounts");
 

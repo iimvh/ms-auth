@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import { createLogger } from "./log.js";
-import { getToneForModel, isSonnet55Model } from "./copilot.js";
-import type { ParsedToolCall, ToolDef } from "./tools.js";
+import { createLogger } from "../io/log.js";
+import { getToneForModel, isSonnet55Model } from "../routing/copilot.js";
+import type { ParsedToolCall, ToolDef } from "../tools/tools.js";
 
 const log = createLogger("fenced");
 

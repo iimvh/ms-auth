@@ -163,7 +163,7 @@ describe("dependency graph baseline", () => {
     const graph = buildGraph({ adapterRoot: ADAPTER_ROOT });
     const saved = loadBaseline()!;
     const first = saved.edges[0];
-    const extra = { from: `${CORE_SRC}/ghost.ts`, to: `${CORE_SRC}/session.ts`, specifier: "./session.js", line: 1 };
+    const extra = { from: `${CORE_SRC}/ghost.ts`, to: `${CORE_SRC}/protocol/session.ts`, specifier: "./session.js", line: 1 };
     const drift = compareToBaseline(graph, { ...saved, edges: [...saved.edges.slice(1), extra] });
     expect(drift.addedEdges.map((e) => `${e.from}->${e.to}`)).toEqual([`${first.from}->${first.to}`]);
     expect(drift.removedEdges).toEqual([extra]);
@@ -175,7 +175,7 @@ describe("dependency graph baseline", () => {
     const graph = buildGraph({ adapterRoot: ADAPTER_ROOT });
     const saved = loadBaseline()!;
     const drift = compareToBaseline(graph, { ...saved, nodes: saved.nodes.filter((node) => !node.endsWith("/session.ts")) });
-    expect(drift.addedNodes).toContain(`${CORE_SRC}/session.ts`);
+    expect(drift.addedNodes).toContain(`${CORE_SRC}/protocol/session.ts`);
     expect(drift.removedNodes).toEqual([]);
   });
 
@@ -186,9 +186,9 @@ describe("dependency graph baseline", () => {
   it("commits the baseline as data covering every core module and its edges", () => {
     const baseline = JSON.parse(readFileSync("scripts/dependency-graph-baseline.json", "utf8"));
     expect(baseline.nodes).toContain(`${CORE_SRC}/index.ts`);
-    expect(baseline.nodes).toContain(`${CORE_SRC}/session.ts`);
+    expect(baseline.nodes).toContain(`${CORE_SRC}/protocol/session.ts`);
     expect(baseline.nodes).toContain(`${ADAPTER_ROOT}/msal/auth.ts`);
-    expect(baseline.edges.some((e: { from: string; to: string }) => e.from === `${CORE_SRC}/model.ts` && e.to === `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
+    expect(baseline.edges.some((e: { from: string; to: string }) => e.from === `${CORE_SRC}/app/model.ts` && e.to === `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
     expect(baseline.nodes.length).toBeGreaterThan(20);
   });
 });

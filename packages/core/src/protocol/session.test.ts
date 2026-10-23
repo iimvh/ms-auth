@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { buildCopilotWebSocketHeaders, buildCopilotWebSocketUrl, cursorMessageId, foldStreamText, readPersonalRecord, TurnTextComposer } from "./session.js";
-import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
-import { PersonalStore } from "./adapters/personal/personal-session.js";
+import { cursorMessageId, foldStreamText, TurnTextComposer } from "./session.js";
+import { buildCopilotWebSocketHeaders, buildCopilotWebSocketUrl, buildPersonalChathubUrl, buildPersonalWebSocketHeaders, personalTurnParams, readPersonalRecord } from "../personal-chathub/chathub.js";
+import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "../account-registry.js";
+import { PersonalStore } from "../adapters/personal/personal-session.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -221,9 +222,7 @@ describe("TurnTextComposer (multi-message turns)", () => {
   });
 });
 
-import { buildPersonalChathubUrl, buildPersonalWebSocketHeaders, personalTurnParams } from "./session.js";
-
-import type { PersonalCapture } from "./adapters/personal/personal-session.js";
+import type { PersonalCapture } from "../adapters/personal/personal-session.js";
 
 const CAPTURE: PersonalCapture = {
   accessToken: "tok", chathubPath: "oid-1@tid-1", scenario: "OfficeWebPaidConsumerCopilot",

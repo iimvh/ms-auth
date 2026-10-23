@@ -1,14 +1,4 @@
-/**
- * The accounts dashboard (§7.5), served at GET /accounts/ui.
- *
- * One static page, inline CSS and JS, no framework and no build step: it ships
- * as a template literal because inside Nitro's build neither the working
- * directory nor the bundled route's location is dependable, and a `readFileSync`
- * there is a 404 waiting for a different launch directory. It talks ONLY to the
- * five /accounts routes (relative URLs, same origin — no CORS), and every value
- * it renders that came from the server goes through `esc()`.
- */
-export const ACCOUNTS_UI_HTML = `<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -246,7 +236,7 @@ export const ACCOUNTS_UI_HTML = `<!doctype html>
         "   " + r.loginCommand,
       ];
       if (r.warning) lines.push("", "Note: " + r.warning);
-      out.textContent = lines.join("\\n");
+      out.textContent = lines.join("\n");
       out.hidden = false;
       document.getElementById("addForm").reset();
       say('Added "' + id + '".', "info");
@@ -262,4 +252,3 @@ export const ACCOUNTS_UI_HTML = `<!doctype html>
 </script>
 </body>
 </html>
-`;

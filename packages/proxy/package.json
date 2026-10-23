@@ -13,7 +13,8 @@
   "scripts": {
     "dev": "nitro dev --port 4141",
     "build": "nitro build",
-    "prepare": "nitro prepare"
+    "prepare": "nitro prepare",
+    "test": "vitest run"
   },
   "dependencies": {
     "@m365-copilot/core": "workspace:*",
@@ -21,7 +22,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "nitropack": "^2.10.4"
+    "h3": "1.15.11",
+    "nitropack": "^2.10.4",
+    "vitest": "^4.1.2"
   },
   "publishConfig": {
     "access": "public"

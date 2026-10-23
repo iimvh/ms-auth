@@ -1,8 +1,9 @@
 import { isPersonalMode } from "@m365-copilot/core";
-import { ACCOUNTS_UI_HTML } from "../../server-accounts-ui";
+import { ACCOUNTS_UI_HTML } from "../../ui/accounts-page";
 
 /**
- * GET /accounts/ui — the accounts dashboard (§7.5). Static HTML; it reads and
+ * GET /accounts/ui — the accounts dashboard (§7.5). The page is
+ * `ui/accounts.html`, inlined into this bundle at build time; it reads and
  * writes everything through the /accounts JSON routes from the browser, so this
  * handler serves the page and nothing else. 404 in enterprise mode, like the
  * rest of the accounts API.

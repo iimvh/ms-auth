@@ -1,5 +1,11 @@
 // Nitro server config for the M365 Copilot proxy.
 // Routes live under routes/, the startup auth lives in plugins/, CORS in middleware/.
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { rawImport } from "./ui/raw-plugin";
+
+const packageDir = dirname(fileURLToPath(import.meta.url));
+
 export default defineNitroConfig({
   compatibilityDate: "2025-01-01",
   preset: "node-server",
@@ -12,5 +18,8 @@ export default defineNitroConfig({
     // chmod each copy to 0o644 right after copyFile, so the rewrite succeeds.
     // No-op for a normal (writable) `pnpm build`.
     chmod: true,
+  },
+  rollupConfig: {
+    plugins: [rawImport(packageDir)],
   },
 });

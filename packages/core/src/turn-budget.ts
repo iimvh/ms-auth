@@ -119,7 +119,14 @@ export function budgetConfig(env: Record<string, string | undefined> = process.e
 // before this change — still matches, and the untagged `Chat turn` form is
 // exactly what the builtin layout counted before. A tagged line belongs to
 // exactly one account.
-const EVENT = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] \[\w+\] \[session\] (Chat turn|Turn result: Throttled)(?:[^\n]*?\baccount=([a-z0-9][a-z0-9-]{0,31}))?/gm;
+//
+// The tag is anchored to END OF LINE and read greedily from the left: the lines
+// this parses carry free text (`text="…"`, `errorCode`, `message`) that can
+// itself contain `account=…` — a prompt is the user's, so taking the first
+// `account=` would let a prompt charge another account's bucket and leave its
+// own uncharged. `$` (with /m) is the only anchor that cannot be fooled by
+// prompt text, because the tag is the last thing write() emits.
+const EVENT = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] \[\w+\] \[session\] (Chat turn|Turn result: Throttled)(?:(?:[^\n]*?)(?: account=([a-z0-9][a-z0-9-]{0,31}))?)?$/gm;
 const LOG_FILE = /debug.*\.log$/;
 const SKIP_DIR = /^(browser-profile|node_modules)$|frames/;
 

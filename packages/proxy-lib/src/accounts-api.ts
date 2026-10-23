@@ -210,7 +210,10 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
   }
   // Before touching the registry: a conversation opened on this account cannot
   // be re-keyed onto another identity, and removing the entry would strand it.
-  // The operator continues or abandons the thread first (from /accounts/ui).
+  // A conversation stays in the pool until it has been idle past
+  // M365_SESSION_IDLE_MS (60 min by default), so the honest instruction is to
+  // switch the client to another account (or stop using that thread) and let
+  // the idle sweep let it go — the page cannot finish it.
   if (isAccountLive(deps, id)) {
     return {
       result: {
@@ -218,7 +221,7 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
         body: errorBody(
           "account_busy",
           `account "${id}" is serving a live conversation`,
-          "finish or abandon that thread first — the accounts page (/accounts/ui) can do it for you, then delete again",
+          "that thread keeps this account until it has been idle past the session idle limit (M365_SESSION_IDLE_MS, 60 min by default) — switch your client to another account or restart the proxy, then delete again",
           { conversationAccount: id },
         ),
       },

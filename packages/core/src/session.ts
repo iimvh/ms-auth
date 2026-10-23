@@ -261,6 +261,14 @@ export interface CopilotSessionOptions {
   temporaryChat?: boolean;
   /** Enable native custom-action support (H-NATIVE-6/7). Off = unchanged behaviour. */
   nativeActions?: NativeActionConfig;
+  /**
+   * The personal account this conversation serves, fixed when the session is
+   * created (§7.6). The record it reads must be THAT account's, or a switch of
+   * the active account mid-thread would pair one account's token with another's
+   * captured params. Undefined = resolve the active account on the first turn
+   * (a CopilotSession built directly); null = the builtin layout.
+   */
+  accountId?: string | null;
 }
 
 /**
@@ -313,9 +321,13 @@ export function buildPersonalChathubUrl(
  *  guarantees one exists; if it still does not — or is corrupt, or has expired —
  *  fail with an error that names WHICH account and why, not a mystery 401 and
  *  not a flat `session_dead` (§7.5). With several accounts, "which one" is the
- *  first thing the operator needs. */
-export function readPersonalRecord(): PersonalRecord {
-  const account = resolveAccount();
+ *  first thing the operator needs.
+ *
+ *  `accountId` pins the account: a thread passes the one it was opened on, so
+ *  its record cannot come from a different account than the token the caller
+ *  resolved from the same id. Omitted = the active account. */
+export function readPersonalRecord(accountId?: string | null): PersonalRecord {
+  const account = accountId === undefined ? resolveAccount() : resolveAccount({ id: accountId });
   const whose = account.id ? `account "${account.id}"` : "the personal account";
   const login = account.id ? loginCommandFor(account.id) : personalLoginCommand();
   const store = new PersonalStore(account.sessionFile);
@@ -405,6 +417,7 @@ export class CopilotSession {
     this.agentId = options?.agentId;
     this.nativeActions = options?.nativeActions;
     this.temporaryChat = options?.temporaryChat ?? true;
+    this._accountId = options?.accountId === undefined ? undefined : options.accountId;
     log.info(`New session: sid=${this.sessionId}, cid=${this.conversationId}, agent=${this.agentId ?? "none"}, nativeActions=${!!this.nativeActions}, temporaryChat=${this.temporaryChat}`);
   }
 
@@ -426,9 +439,11 @@ export class CopilotSession {
 
     // Which account this thread is on is fixed for its lifetime (§7.6): a
     // switch mid-thread must not retag a running thread's turns, or the thread
-    // would be silently re-routed. `chat()` runs before the stream reader that
-    // spends the turns, so the field is set by then; the reader's `this` is not
-    // the session, so the value is captured here.
+    // would be silently re-routed. The session is normally constructed with it
+    // (ModelSession passes its pinned accountId); a bare CopilotSession
+    // resolves the active account on its first turn. `chat()` runs before the
+    // stream reader that spends the turns, so the field is set by then; the
+    // reader's `this` is not the session, so the value is captured here.
     this._accountId ??= isPersonalMode() ? resolveAccount().id : null;
     const accountId = this._accountId;
     const accountTag = accountId ? ` account=${accountId}` : "";
@@ -437,7 +452,7 @@ export class CopilotSession {
     recordTurn(undefined, accountId); // the throttle-avoidance bucket counts what that line counts (turn-budget.ts)
 
     const requestId = crypto.randomUUID();
-    const personal = isPersonalMode() ? readPersonalRecord() : null;
+    const personal = isPersonalMode() ? readPersonalRecord(accountId) : null;
     // The personal (consumer) token is an opaque JWE — there are no readable
     // claims, and the personal URL builder does not need any (F98/F106). Decode
     // only on the enterprise path, where oid/tid feed the socket URL.

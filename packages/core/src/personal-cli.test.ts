@@ -1,10 +1,10 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runPersonalCli } from "./personal-cli.js";
 import { PersonalStore } from "./personal-session.js";
-import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
+import { accountsDir, activateAccount, clearMockRegistry, configDir, useMockRegistry } from "./account-registry.js";
 
 const capture = {
   accessToken: "secret-token", chathubPath: "oid@tid", scenario: "OfficeWebPaidConsumerCopilot",
@@ -65,6 +65,32 @@ describe("m365-personal cli", () => {
     expect(d.store.read()).toBeNull();
     expect(await runPersonalCli(["wat"], { store: d.store, out: d.outFn })).toBe(2);
   });
+
+  it("logout refuses a profileDir that is the data dir itself", async () => {
+    // `logout` is an rm -rf of profileDir, and a hand-edited registry entry can
+    // point it at the data dir, which would take secrets.json and every other
+    // account with it.
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }]);
+    try {
+      const out: string[] = [];
+      let err: { code?: string; message: string } | null = null;
+      try {
+        await runPersonalCli(["logout"], {
+          store: new PersonalStore(join(configDir(), "personal-session.json")),
+          profileDir: configDir(),
+          out: (l: string) => out.push(l),
+        });
+      } catch (e) { err = e as { code?: string; message: string }; }
+      expect(err).not.toBeNull();
+      expect(err!.code).toBe("registry_invalid");
+      expect(err!.message).toContain("refusing to delete");
+      expect(existsSync(configDir())).toBe(true);
+    } finally {
+      clearMockRegistry();
+      delete process.env.M365_ACCOUNT_HOME;
+    }
+  });
 });
 
 describe("--account", () => {
@@ -100,6 +126,16 @@ describe("--account", () => {
     const parsed = JSON.parse(out.join("\n"));
     expect(parsed.scenario).toBeTruthy();
     expect(parsed.account).toBe("work");
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
+  });
+
+  it("--account with no value does not swallow the next flag", async () => {
+    withRegistry();
+    const out: string[] = [];
+    const code = await runPersonalCli(["status", "--account", "--json"], { out: (l) => out.push(l), now: () => 1 });
+    expect(code).toBe(2);
+    expect(out.join("\n")).toContain("--account needs an account id");
     clearMockRegistry();
     delete process.env.M365_ACCOUNT_HOME;
   });

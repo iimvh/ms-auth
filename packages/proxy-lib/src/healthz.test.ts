@@ -24,6 +24,14 @@ describe("/healthz", () => {
     expect(payload.credential).toMatchObject({ status: expect.any(String) });
   });
 
+  it("names the registry file the counts came from (spec 7.9)", async () => {
+    process.env.M365_AUTH = "personal";
+    const src = useMockRegistry([{ id: "default", hasSession: true }]);
+    const payload = await buildHealthzPayload({ probeCdp: async () => false });
+    expect(payload.accounts.path).toBe(src.file);
+    expect(payload.accounts.repository).toBe("registry");
+  });
+
   it("follows a switch without a restart", async () => {
     process.env.M365_AUTH = "personal";
     useMockRegistry([{ id: "default" }, { id: "work" }]);

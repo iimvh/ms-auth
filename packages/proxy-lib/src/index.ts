@@ -95,12 +95,16 @@ export interface FetchApp {
   fetch(req: Request): Promise<Response>;
 }
 
-export interface CreateAppOptions extends ModelSessionOptions {
+export interface CreateAppOptions extends Omit<ModelSessionOptions, "accountId"> {
   /**
    * The personal account each request runs on, resolved PER REQUEST: a function,
    * not a value, so a switch (POST /accounts/:id/activate) takes effect on the
    * next request without rebuilding the app (spec §7.3). Defaults to core's
    * `resolveAccount()` in personal mode, and null (the builtin layout) otherwise.
+   *
+   * (ModelSessionOptions' own `accountId` is a pinned VALUE for one session; the
+   * pool pins each conversation from this per-request answer, so it is omitted
+   * here rather than shadowed.)
    */
   accountId?: () => string | null;
 }

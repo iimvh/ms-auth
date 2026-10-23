@@ -333,4 +333,26 @@ describe("a personal failure names the account (Task 8)", () => {
     expect(msg).toContain('account "work"');
     expect(msg).toContain("expired");
   });
+
+  // The bug this pins (whole-branch review): the thread's token came from the
+  // ACTIVE account while its record was read from whatever was active now, so
+  // a switch mid-thread sent account A's record with account B's token.
+  it("a pinned account reads ITS record after a switch, not the newly active one's", () => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
+    const fresh = (token: string) => ({
+      accessToken: token, chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
+      agentHost: "h", product: null, source: "officeweb" as const, optionsSets: [], allowedMessageTypes: ["Chat"],
+      emailHint: null, probe: null, mintCount: 1, lastMintAt: 0, expiresAt: Date.now() + 3_600_000,
+      capturedAt: Date.now() - 60_000 });
+    new PersonalStore(join(accountsDir(), "default", "session.json")).write(fresh("token-default"));
+    new PersonalStore(join(accountsDir(), "work", "session.json")).write(fresh("token-work"));
+    activateAccount("default");
+    // The thread is opened on default and the active account switches away.
+    expect(readPersonalRecord("default").accessToken).toBe("token-default");
+    activateAccount("work");
+    expect(readPersonalRecord("default").accessToken).toBe("token-default"); // still its own
+    expect(readPersonalRecord().accessToken).toBe("token-work"); // active has moved on
+    expect(() => readPersonalRecord("nope")).toThrow(/does not exist/);
+  });
 });

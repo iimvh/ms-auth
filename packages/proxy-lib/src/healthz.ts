@@ -14,6 +14,8 @@ export interface HealthzPayload {
   authMode: "msal" | "personal";
   credential: PersonalHealth | { applicable: false };
   accounts: {
+    /** The registry file the counts below came from (§7.9). */
+    path: string;
     count: number;
     activeId: string | null;
     /** `registry` when accounts.json decided it, `builtin` when it fell back. */
@@ -39,6 +41,7 @@ function safeRegistryStatus(): HealthzPayload["accounts"] {
   try {
     const st = registryStatus();
     return {
+      path: st.path,
       count: st.count,
       activeId: st.activeId,
       repository: st.repository,
@@ -46,6 +49,7 @@ function safeRegistryStatus(): HealthzPayload["accounts"] {
     };
   } catch (err) {
     return {
+      path: "",
       count: 0,
       activeId: null,
       repository: "builtin",

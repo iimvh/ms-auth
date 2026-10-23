@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -17,6 +17,8 @@ import {
   clearMockRegistry,
   configDir,
   createMockRegistry,
+  createMockRegistryAt,
+  isRealDataDir,
   migrateRegistry,
   readRegistry,
   registryProblem,
@@ -55,10 +57,19 @@ beforeAll(() => {
   process.env.M365_ACCOUNT_HOME = home;
 });
 
-afterEach(() => clearMockRegistry());
+afterEach(() => {
+  clearMockRegistry();
+  // clearMockRegistry drops M365_ACCOUNT_HOME too; put this file's home back so
+  // no later test (or a second useMockRegistry) runs against the real dir.
+  process.env.M365_ACCOUNT_HOME = home;
+});
 
 const registry = (accounts: AccountRegistry["accounts"], activeId = accounts[0]?.id ?? "default"): AccountRegistry =>
   ({ version: 1, activeId, accounts });
+
+// The developer's real data dir, spelled out independently of the module so the
+// guard tests below assert against the true location.
+const REAL_CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
 
 describe("account ids", () => {
   it("accepts lowercase slugs and rejects anything else", () => {
@@ -130,6 +141,30 @@ describe("the registry source", () => {
     expect(reg.accounts[0]!.cdpPort).toBe(9230);
     expect(existsSync(join(accountsDir(), "work", "session.json"))).toBe(true);
     expect(existsSync(join(accountsDir(), "work", "profile"))).toBe(false);
+  });
+
+  it("useMockRegistry redirects the account home, so a mock can never write into the real data dir", () => {
+    // The defect this pins: two test files called useMockRegistry before setting
+    // M365_ACCOUNT_HOME, so a whole `npx vitest run` created
+    // ~/.config/opencode-m365/accounts/{default,work} on the developer's machine.
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
+    const src = useMockRegistry([{ id: "default" }, { id: "work" }]);
+    expect(isRealDataDir(accountsDir())).toBe(false);
+    expect(accountsDir()).not.toBe(REAL_CONFIG_DIR);
+    expect(existsSync(join(accountsDir(), "work", "session.json"))).toBe(false);
+    expect(isRealDataDir(REAL_CONFIG_DIR)).toBe(true);
+    expect(isRealDataDir(join(REAL_CONFIG_DIR, "accounts", "work"))).toBe(true);
+    expect(isRealDataDir(undefined)).toBe(true);
+    expect(isRealDataDir(home)).toBe(false);
+    expect(src.file.startsWith(accountsDir().replace(/[\\/]accounts$/, ""))).toBe(true);
+  });
+
+  it("refuses to write a mock registry into the real data dir", () => {
+    clearMockRegistry();
+    const file = join(REAL_CONFIG_DIR, "accounts.json");
+    expect(() => createMockRegistryAt(file, [{ id: "default" }])).toThrow(/real data dir/);
+    expect(existsSync(file)).toBe(false);
   });
 });
 
@@ -375,6 +410,30 @@ describe("resolveAccount", () => {
     expect(resolveAccount({ id: "work" })).toMatchObject({ id: "work", source: "cli" });
     expect(resolveAccount().id).toBe("default");
     expect(() => resolveAccount({ id: "gone" })).toThrow(/gone/);
+  });
+
+  // Whole-branch review: with a broken registry every `--account <id>` said
+  // "does not exist - known accounts: none", naming the wrong problem.
+  it("a named account against a broken registry says the registry is broken", () => {
+    clearMockRegistry();
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    writeFileSync(file, "{ this is not json");
+    process.env.M365_ACCOUNTS_FILE = file;
+    let err: AccountError | null = null;
+    try { resolveAccount({ id: "work" }); } catch (e) { err = e as AccountError; }
+    expect(err).toBeInstanceOf(AccountError);
+    expect(err!.code).toBe("registry_invalid");
+    expect(err!.hint).toContain("fix or delete");
+  });
+
+  it("rejects a hand-edited id that is not a valid account id", () => {
+    useMockRegistry([{ id: "default" }]);
+    const file = process.env.M365_ACCOUNTS_FILE!;
+    const reg = JSON.parse(readFileSync(file, "utf-8")) as AccountRegistry;
+    reg.accounts.push({ ...reg.accounts[0]!, id: "../escape" });
+    writeFileSync(file, JSON.stringify(reg));
+    expect(() => resolveAccount({ id: "../escape" })).toThrow(/invalid account id/);
   });
 
   it("an env override beats the registry, and says so exactly once", () => {

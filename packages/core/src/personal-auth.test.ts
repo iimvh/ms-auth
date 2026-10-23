@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ensurePersonalCredentials, getPersonalToken, PersonalAuthError, resetPersonalAuthState } from "./personal-auth.js";
+import { ensurePersonalCredentials, getPersonalToken, PersonalAuthError, resetPersonalAuthState, type PersonalAuthDeps } from "./personal-auth.js";
 import { PersonalCaptureError } from "./personal-capture.js";
 import { HarvestError } from "./personal-harvest.js";
 import { PersonalStore, type PersonalRecord } from "./personal-session.js";
@@ -14,7 +14,7 @@ const fresh = (over: Partial<PersonalRecord> = {}): PersonalRecord => ({
   allowedMessageTypes: ["Chat"], expiresAt: 10 * HOUR, capturedAt: HOUR, emailHint: null, probe: null,
   mintCount: 1, lastMintAt: 0, ...over,
 });
-const setup = (record: PersonalRecord | null, over: Partial<{ harvest: unknown; capture: unknown }> = {}) => {
+const setup = (record: PersonalRecord | null, over: Partial<Pick<PersonalAuthDeps, "harvest" | "capture">> = {}) => {
   const store = new PersonalStore(join(mkdtempSync(join(tmpdir(), "ps-")), "s.json"));
   if (record) store.write(record);
   const capture = vi.fn(async () => ({ ...fresh({ accessToken: "tok-new" }) }));

@@ -1,9 +1,10 @@
 import { statSync, rmSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { capturePersonalSession } from "./personal-capture.js";
 import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
 import { PersonalStore } from "./personal-session.js";
-import { AccountError, resolveAccount } from "./account-registry.js";
+import { AccountError, accountsDir, configDir, resolveAccount } from "./account-registry.js";
 import { probePersonalCapture } from "./session.js";
 import { createLogger } from "./log.js";
 
@@ -133,7 +134,11 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
   const json = flags.includes("--json");
   // --account is resolved BEFORE anything is captured or written: naming an
   // account must never silently fall back to the active one (§7.9).
-  const parsed = parseFlags(flags.filter((f) => f !== "--json"), []);
+  // Only the FIRST --json is dropped, so `--account --json` cannot leave the
+  // flag's own name to be read as an account id.
+  const jsonAt = flags.indexOf("--json");
+  const flagArgs = jsonAt === -1 ? flags : [...flags.slice(0, jsonAt), ...flags.slice(jsonAt + 1)];
+  const parsed = parseFlags(flagArgs, []);
   if (!parsed.ok) return usageError(parsed.why, deps?.out);
   let d: CliDeps;
   try {
@@ -210,6 +215,19 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
       return 0;
     }
     case "logout": {
+      // Deleting the profile is `rm -rf`, and with a registry the profile dir
+      // comes from the file: a hand-edited entry pointing at the data dir
+      // itself would take secrets.json and every other account with it. The
+      // same guard as removeAccount, and the same refusal.
+      const profile = resolve(d.profileDir);
+      const config = resolve(configDir());
+      if (profile === config || profile === resolve(accountsDir()) || profile === dirname(config)) {
+        throw new AccountError(
+          "registry_invalid",
+          `refusing to delete ${profile}: it is the data dir itself, not one account's browser profile`,
+          "fix that account's profileDir in accounts.json (it should be <data dir>/accounts/<id>/profile)",
+        );
+      }
       d.store.delete();
       try {
         rmSync(d.profileDir, { recursive: true, force: true });

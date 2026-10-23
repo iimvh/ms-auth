@@ -161,6 +161,22 @@ const MOCK_SESSION = {
   lastMintAt: 0,
 };
 
+/** The config root dirs are recorded once, before any test can point
+ *  `M365_ACCOUNT_HOME` at a temp dir, so the real data dir is identifiable even
+ *  mid-run. */
+const REAL_HOME_DIR = homedir();
+const REAL_CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
+
+/** True when `p` is the developer's real data dir (or inside it). On an
+ *  operator's machine that dir holds a live signed-in account, so a test must
+ *  never write there — the Task-1 ruling's whole point. */
+export function isRealDataDir(p: string | undefined): boolean {
+  if (!p) return true;
+  const real = REAL_CONFIG_DIR.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+  const path = resolve(p).replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+  return path === real || path.startsWith(`${real}/`) || path === REAL_HOME_DIR.replace(/\\/g, "/").toLowerCase();
+}
+
 /** Write the real files the flags ask for under `<config>/accounts/<id>/`, then
  *  the registry that points at them, into `source.file`. */
 function writeMockAccounts(
@@ -179,6 +195,14 @@ function writeMockAccounts(
       profileDir: join(accountsDir(), mock.id, "profile"),
       createdAt: new Date().toISOString(),
     };
+    // A mock that would create files in the real data dir is a test bug, and a
+    // destructive one (it pollutes a live signed-in account's dir). Fail loudly
+    // here rather than silently writing there.
+    if (isRealDataDir(entry.sessionFile) || isRealDataDir(entry.profileDir) || isRealDataDir(source.file)) {
+      throw new Error(
+        `mock registry would write into the real data dir (${REAL_CONFIG_DIR}); point M365_ACCOUNT_HOME (or use useMockRegistry) at a temp dir first`,
+      );
+    }
     mkdirSync(dirname(entry.sessionFile), { recursive: true });
     if (mock.hasSession) writeFileSync(entry.sessionFile, JSON.stringify(MOCK_SESSION, null, 2));
     if (mock.profileExists) mkdirSync(entry.profileDir, { recursive: true });
@@ -207,17 +231,28 @@ export function createMockRegistryAt(
   return source;
 }
 
-/** Point the process at a new temporary registry and fill it in. */
+/** Point the process at a new temporary registry and fill it in.
+ *
+ *  It also points `M365_ACCOUNT_HOME` at the same temp dir, and that is not a
+ *  convenience: `writeMockAccounts` creates `<config>/accounts/<id>/`, so a mock
+ *  registry built against the real config dir would create directories inside
+ *  the developer's live `~/.config/opencode-m365` — which on an operator's
+ *  machine holds a signed-in account. Doing it here means no caller can forget
+ *  (the Task-1 ruling fixed it file by file; two files still forgot). */
 export function useMockRegistry(accounts: MockAccount[] = []): AccountRegistrySource {
-  const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+  const dir = mkdtempSync(join(tmpdir(), "ar-"));
+  process.env.M365_ACCOUNT_HOME = dir;
+  const file = join(dir, "accounts.json");
   process.env.M365_ACCOUNTS_FILE = file;
   return createMockRegistryAt(file, accounts);
 }
 
-/** Drop the `M365_ACCOUNTS_FILE` override, so the next call resolves the real
- *  config dir (or is re-pointed by the test). */
+/** Drop the `M365_ACCOUNTS_FILE` and `M365_ACCOUNT_HOME` overrides
+ *  `useMockRegistry` set, so the next call resolves the real config dir (or is
+ *  re-pointed by the test). */
 export function clearMockRegistry(): void {
   delete process.env.M365_ACCOUNTS_FILE;
+  delete process.env.M365_ACCOUNT_HOME;
 }
 
 /** `~` and `~/x` (or `~\x`) expand to the home directory; anything else
@@ -768,7 +803,10 @@ function warnOnce(key: string, line: string, onWarn?: (line: string) => void): b
   if (warned.has(key)) return false;
   warned.add(key);
   if (onWarn) onWarn(line);
-  else log.info(line);
+  // stderr, not the debug log: this warning is the operator's only signal that a
+  // stale M365_PERSONAL_* variable is silently defeating account switching, and
+  // the logger is a no-op unless M365_DEBUG is set (§7.2.2).
+  else console.error(`[accounts] ${line}`);
   return true;
 }
 
@@ -782,17 +820,38 @@ export function resolveAccount(opts: ResolveAccountOptions = {}): ResolvedAccoun
     cdpUrl: env.M365_PERSONAL_CDP_URL || PERSONAL_SETTINGS[2].fallback(),
   };
 
-  const registry = readRegistry(accountRegistrySource()).registry;
+  const source = accountRegistrySource();
+  const read = readRegistry(source);
+  const registry = read.registry;
   const overrides = PERSONAL_SETTINGS.filter((s) => Boolean(env[s.env]));
 
   if (opts.id) {
+    // An explicitly named account is never guessed at: a broken registry must
+    // say "the registry is broken", not "no such account - known accounts:
+    // none", which sends the operator hunting for the wrong thing.
+    if (!read.ok && read.problem !== "absent") {
+      throw new AccountError(
+        "registry_invalid",
+        `cannot resolve account "${opts.id}": the account registry is unusable (${read.problem})`,
+        invalidHint(source.file),
+      );
+    }
+    if (opts.id !== null && !isSafeAccountId(opts.id)) {
+      throw new AccountError(
+        "invalid_id",
+        `invalid account id "${opts.id}"`,
+        `ids match ${ACCOUNT_ID_RE.source}: lowercase letters, digits and dashes, starting with a letter or digit`,
+      );
+    }
     const entry = registry?.accounts.find((a) => a.id === opts.id);
     if (!entry) {
       const known = registry?.accounts.map((a) => a.id) ?? [];
       throw new AccountError(
         "not_found",
         `account "${opts.id}" does not exist`,
-        `known accounts: ${known.join(", ") || "none"}`,
+        known.length > 0
+          ? `known accounts: ${known.join(", ")}`
+          : `no accounts yet - add one with the proxy's /accounts/ui (or POST /accounts)`,
       );
     }
     return resolvedFrom(entry, "cli");

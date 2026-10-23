@@ -35,4 +35,18 @@ describe("SessionPool and the account", () => {
     expect(pool.forgetAccount("a")).toBe(1);
     expect(pool.liveAccountIds()).toEqual(["b"]);
   });
+
+  // The cross-account bug the whole-branch review found lived between the pool
+  // and the token: the conversation knew its account, the session did not.
+  it("pins the conversation's account into its ModelSession, so its token and record agree", () => {
+    const pool = new SessionPool();
+    const a = pool.resolve(msgs, undefined, "default");
+    const b = pool.resolve(msgs, undefined, "work");
+    const builtin = pool.resolve([{ role: "user", content: "third" }] as never, undefined, null);
+    expect(a.session.accountId).toBe("default");
+    expect(b.session.accountId).toBe("work");
+    expect(builtin.session.accountId).toBeNull();
+    // A continuation keeps the pinned account, whatever the active one is now.
+    expect(pool.resolve([...msgs], undefined, "default").session.accountId).toBe("default");
+  });
 });

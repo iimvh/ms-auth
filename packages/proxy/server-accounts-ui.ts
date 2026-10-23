@@ -109,7 +109,12 @@ export const ACCOUNTS_UI_HTML = `<!doctype html>
     return payload;
   }
 
-  // A conversation of this account is in the pool: deleting it would 409.\n  function liveBadge(a) {\n    return a.accountIdLive ? ' <div class="muted">live conversation</div>': "";\n  }\n\n  function statusPill(credential) {
+  // A conversation of this account is still in the pool, so DELETE would 409.
+  function liveBadge(a) {
+    return a.accountIdLive ? ' <span class="muted">(live conversation)</span>' : "";
+  }
+
+  function statusPill(credential) {
     if (!credential) return '<span class="pill unknown">unknown</span>';
     var s = String(credential.status);
     return '<span class="pill ' + esc(s) + '">' + esc(s) + "</span>";
@@ -148,7 +153,7 @@ export const ACCOUNTS_UI_HTML = `<!doctype html>
       return '<tr class="' + rowClasses.join(" ") + '" data-id="' + idAttr + '">' +
         '<td><input type="radio" name="active" value="' + idAttr + '"' + (a.active ? " checked" : "") +
           ' aria-label="make active"' + (a.active ? " disabled" : "") + "></td>" +
-        "<td><strong>" + esc(a.label) + "</strong>" + (a.accountIdLive ? ' <span class="muted">(live)</span>' : "") +
+        "<td><strong>" + esc(a.label) + "</strong>" +
           '<div class="muted">' + idAttr + "</div></td>" +
         "<td>" + statusPill(a.credential) + liveBadge(a) + "</td>" +
         '<td data-expires="' + esc(c.expiresInMs) + '">' + esc(minutes(c.expiresInMs)) + "</td>" +

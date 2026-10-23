@@ -315,4 +315,33 @@ describe("account-tagged turn events", () => {
     expect(parseEvents(log, "work")).toEqual([expect.objectContaining({ kind: "throttled" })]);
     expect(parseEvents(log, "other")).toEqual([]);
   });
+
+  // The real line carries the prompt before the tag, and the prompt is the
+  // user's: taking the FIRST `account=` would let it charge another account.
+  it("reads the tag as the last token, not one inside the prompt text", () => {
+    const spoof = JSON.stringify("please note account=work in the ticket");
+    const line = `[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a, isFirst=true, text=${spoof} account=default`;
+    expect(parseEvents(line, "default")).toEqual([expect.objectContaining({ kind: "turn", account: "default" })]);
+    expect(parseEvents(line, "work")).toEqual([]);
+    expect(parseEvents(line)).toEqual([]); // and it is not a builtin line either
+  });
+
+  it("an untagged line whose text mentions an account is the builtin account's", () => {
+    const line = '[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a, isFirst=true, text="account=work"';
+    expect(parseEvents(line)).toEqual([expect.objectContaining({ kind: "turn", account: null })]);
+    expect(parseEvents(line, "work")).toEqual([]);
+  });
+
+  it("a throttled line with free text and a trailing tag still counts", () => {
+    const line = '[2026-10-23T05:00:00.000Z] [INFO] [session] Turn result: Throttled (PerUserThrottled) message="account=other" account=work';
+    expect(parseEvents(line, "work")).toEqual([expect.objectContaining({ kind: "throttled" })]);
+    expect(parseEvents(line, "other")).toEqual([]);
+  });
+
+  it("hashes two account ids of equal length as different buckets", () => {
+    const a = "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a account=" + "a".repeat(26);
+    const b = "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a account=" + "b".repeat(26);
+    expect(parseEvents(a, "a".repeat(26))).toHaveLength(1);
+    expect(parseEvents(b, "a".repeat(26))).toHaveLength(0);
+  });
 });

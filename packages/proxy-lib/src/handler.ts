@@ -281,7 +281,11 @@ export class SessionPool {
     // New conversation
     log.info(`New conversation ${fingerprint}${account ? ` account=${account}` : ""}, ${this.conversations.size} active`);
     const state: ConversationState = {
-      session: new ModelSession(this.sessionOptions),
+      // The account is pinned into the session at birth: every turn of this
+      // conversation resolves its token AND its record from THIS id, so a
+      // switch of the active account mid-thread cannot pair one account's token
+      // with another's captured params (§7.2).
+      session: new ModelSession({ ...this.sessionOptions, accountId: account }),
       sentMessageCount: 0,
       lastSentIsReset: false,
       pendingNote: null,
@@ -549,7 +553,11 @@ export async function handleChatCompletion(
   // behaviour, byte for byte.
   if (opts.ensureCredentials) {
     try {
-      await opts.ensureCredentials(account);
+      // The CONVERSATION's account, not this request's: a continuation keeps
+      // the account it was opened on (an existing conversation is reused after
+      // a switch), and minting for the wrong one would hand this thread
+      // another account's credentials.
+      await opts.ensureCredentials(conv.accountId);
     } catch (err: any) {
       log.info(`Pre-flight failed: ${err?.message}`);
       return jsonResponse(401, {
@@ -595,7 +603,8 @@ export async function handleChatCompletion(
     // starting fresh turns into the throttle and let it self-heal (H-R1). This
     // replaced the old auto-reauth, which didn't clear the throttle and raised our
     // detection profile. A single long pi thread never trips the trigger.
-    await awaitDegradationBackoff(account);
+    // The account this conversation runs on (see ensureCredentials above).
+    await awaitDegradationBackoff(conv.accountId);
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       // A <tool_response> the model writes after a real call is a stop sequence
       // (truncateAtFabricatedToolResponse), but the cut in produce() only runs
@@ -687,7 +696,7 @@ export async function handleChatCompletion(
       // straight back into the throttle, then a 502 blaming a content filter.
       // Fail fast with a 429 instead, and count it toward the degradation backoff.
       if (copilotStream.result?.value === "Throttled") {
-        noteRequestOutcome(true, convId, account);
+        noteRequestOutcome(true, convId, conv.accountId);
         log.info(`Upstream Throttled (${copilotStream.result.errorCode ?? "no errorCode"}) — 429, no retry`);
         return { error: throttledResponse(copilotStream.result) };
       }
@@ -752,13 +761,13 @@ export async function handleChatCompletion(
           attempt--;
           continue;
         }
-        noteRequestOutcome(false, convId, account); // an answer, not a throttle
+        noteRequestOutcome(false, convId, conv.accountId); // an answer, not a throttle
         log.info(`Priority access exhausted (${exhausted.window}) — resets ${exhausted.resetsAt.toISOString()}`);
         return { error: priorityAccessResponse(exhausted, model) };
       }
 
       if (copilotStream.hasContent || fullText.length > 0) {
-        noteRequestOutcome(false, convId, account); // clean response → degradation has lifted
+        noteRequestOutcome(false, convId, conv.accountId); // clean response → degradation has lifted
         if (useToolAgent) noteAgentRouteAlive(tone); // the agent route answered on this account
         conv.servedModel = model;
         inputImages = []; // on the server now: a forcing retry in this conversation needn't resend them
@@ -871,11 +880,11 @@ export async function handleChatCompletion(
         // this is the thread-rate throttle signature (F13). Feed the degradation-
         // backoff policy — once empties span enough distinct conversations it paces
         // subsequent turns so the account can self-heal (H-R1). Never blocks this request.
-        noteRequestOutcome(true, convId, account);
+        noteRequestOutcome(true, convId, conv.accountId);
         return { error: emptyResponseResponse(t) };
       }
     }
-    noteRequestOutcome(true, convId, account);
+    noteRequestOutcome(true, convId, conv.accountId);
     return { error: emptyResponseResponse(null) };
   }
 

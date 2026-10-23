@@ -1,4 +1,5 @@
 import { getToken } from "./auth.js";
+import { getPersonalToken } from "./personal-auth.js";
 import { isPersonalMode } from "./personal-mode.js";
 import { getOrCreateAgent } from "./agent.js";
 import { CopilotSession } from "./session.js";
@@ -12,6 +13,15 @@ const log = createLogger("model");
 export interface ModelSessionOptions {
   /** Pre-resolved auth token. If not provided, getToken() is called. */
   getToken?: () => Promise<string>;
+  /**
+   * The personal account this session serves (§7.6), fixed for its whole life.
+   * The token, the record and the CDP endpoint must all come from the same
+   * account: a thread opened on one account must never send another's token
+   * with this one's captured params — silent cross-account corruption, the
+   * worst failure this design can produce (§7.2). null/absent = the builtin
+   * layout. Enterprise (MSAL) mode ignores it.
+   */
+  accountId?: string | null;
   /** Whether to attempt agent resolution. Default: true. */
   useAgent?: boolean;
   /**
@@ -32,6 +42,8 @@ export interface ModelSessionOptions {
  */
 export class ModelSession {
   private resolveToken: () => Promise<string>;
+  /** The account this session serves for its whole life; null = builtin. */
+  readonly accountId: string | null;
   private useAgent: boolean;
   private temporaryChat: boolean;
   private copilotSession: CopilotSession | null = null;
@@ -54,7 +66,13 @@ export class ModelSession {
   }
 
   constructor(options: ModelSessionOptions = {}) {
-    this.resolveToken = options.getToken ?? getToken;
+    // A pinned account binds the DEFAULT token resolution to that account, so a
+    // later switch of the active account cannot hand this session another
+    // account's token (see ModelSessionOptions.accountId).
+    const pinned = options.accountId ?? null;
+    this.accountId = pinned;
+    this.resolveToken = options.getToken
+      ?? (pinned !== null && isPersonalMode() ? () => getPersonalToken({ accountId: pinned }) : getToken);
     // Personal mode forces the tool agent OFF (spec §10.4) while still
     // honouring an explicit useAgent: false.
     this.useAgent = options.useAgent !== false && !(isPersonalMode() && !options.useAgent);
@@ -76,6 +94,7 @@ export class ModelSession {
       sessionId: this.sessionId,
       conversationId: this.conversationId,
       temporaryChat: this.temporaryChat,
+      accountId: this.accountId,
     });
   }
 

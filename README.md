@@ -358,6 +358,31 @@ signed-in browser — this is the durable secret) and `personal-session.json` (t
 token cache). Full env vars, failure messages and the operator runbook:
 [`docs/personal-auth.md`](docs/personal-auth.md).
 
+### Several accounts
+
+One data dir holds several personal accounts, one active at a time, in an
+`accounts.json` registry (`<id>`, label, `cdpPort`, its own record and browser
+profile). The proxy resolves the active account **per request**, so a switch needs no
+restart, and a thread already running keeps the account it was opened on.
+
+```
+GET    /accounts                    # every account + health, and where the registry lives
+POST   /accounts                    # { id, label } → the Chrome + login commands
+POST   /accounts/<id>/activate      # switch (next request onward)
+PATCH  /accounts/<id>               # { label }
+DELETE /accounts/<id>               # refuses the active/last account and one serving a thread
+GET    /accounts/ui                 # the dashboard (loopback only)
+```
+
+Each account gets its own Chrome on its own debugging port (`personal-profile`
+collision: two Chromes on one `--user-data-dir` share 9222), and its own keeper:
+`pwsh scripts/chrome-keeper.ps1 -Account <id>`. `pnpm m365-personal login|status|logout
+--account <id>` act on one account. `/healthz` reports the active account's credential
+state plus `accounts: { count, activeId }`. A throttled or exhausted account slows down
+nothing else: the mint mutex, credential cache, degradation backoff, turn budget and
+conversation fingerprint are all per account. Full walkthrough:
+[Several accounts](docs/personal-auth.md#several-accounts).
+
 ## Available models
 
 > **Using a personal Microsoft account?** See [Personal account](#personal-account):
@@ -696,7 +721,9 @@ Three token scopes are acquired:
 | `CHROMIUM_PATH` | Path to Chromium binary for automated login |
 | `M365_AUTH` | `msal` (default) or `personal`. An unknown value fails at boot naming the allowed values. See [Personal account](#personal-account). |
 | `M365_PERSONAL_CDP_URL` | Attach the personal capture to an already-running Chrome instead of launching one (e.g. `http://127.0.0.1:9222`). Required in practice: the consumer sign-in is behind a Cloudflare gate that refuses a Playwright-launched browser. |
-| `M365_PERSONAL_SESSION_FILE` / `M365_PERSONAL_PROFILE` | Override the personal record file and browser-profile directory (defaults `~/.config/opencode-m365/personal-session.json` and `.../personal-profile/`). |
+| `M365_PERSONAL_SESSION_FILE` / `M365_PERSONAL_PROFILE` | Override the personal record file and browser-profile directory. **Overrides, not defaults:** when set they win over the account registry for every account, so in a multi-account setup both accounts share one record and one profile — leave them unset (see [Several accounts](docs/personal-auth.md#several-accounts)). |
+| `M365_ACCOUNTS_FILE` | The account registry (default `<data dir>/accounts.json`). Governs personal mode only — MSAL mode ignores it. Add, switch, rename and remove accounts with `GET /accounts`, `POST /accounts`, `POST /accounts/<id>/activate`, `PATCH /accounts/<id>`, `DELETE /accounts/<id>`, or the dashboard at **`/accounts/ui`** (loopback only). `/healthz` reports the active account plus `accounts: { count, activeId }`. See [Several accounts](docs/personal-auth.md#several-accounts). |
+| `M365_ACCOUNT_HOME` | The data dir itself (default `~/.config/opencode-m365`), for tests and side-by-side installs. |
 | `M365_PERSONAL_MODEL` | Override the default upstream model name personal mode reports. |
 | `M365_PERSONAL_PROBE_MODELS` / `M365_PERSONAL_PROBE` | Candidate ladder for the login-time capability probe (default `claude-sonnet`); `M365_PERSONAL_PROBE=0` skips it. |
 | `M365_PERSONAL_AUTOMATED_LOGIN` | `0` stops `login` from driving the sign-in form with `secrets.json` (email/password/TOTP) and waits for a human instead. |

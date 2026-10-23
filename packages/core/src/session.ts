@@ -31,6 +31,7 @@ import { PersonalAuthError, personalLoginCommand } from "./personal-auth.js";
 import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
 import { PersonalStore, personalSessionFile } from "./personal-session.js";
 import { loginCommandFor, resolveAccount } from "./account-registry.js";
+import type { TurnContext } from "./turn-context.js";
 
 const RS = "\x1E";
 const log = createLogger("session");
@@ -269,6 +270,7 @@ export interface CopilotSessionOptions {
    * (a CopilotSession built directly); null = the builtin layout.
    */
   accountId?: string | null;
+  turnContext?: TurnContext;
 }
 
 /**
@@ -410,6 +412,7 @@ export class CopilotSession {
   private agentId?: string;
   private nativeActions?: NativeActionConfig;
   private temporaryChat: boolean;
+  private turnContext: TurnContext | null;
 
   constructor(options?: CopilotSessionOptions) {
     this.sessionId = options?.sessionId ?? crypto.randomUUID();
@@ -418,6 +421,7 @@ export class CopilotSession {
     this.nativeActions = options?.nativeActions;
     this.temporaryChat = options?.temporaryChat ?? true;
     this._accountId = options?.accountId === undefined ? undefined : options.accountId;
+    this.turnContext = options?.turnContext ?? null;
     log.info(`New session: sid=${this.sessionId}, cid=${this.conversationId}, agent=${this.agentId ?? "none"}, nativeActions=${!!this.nativeActions}, temporaryChat=${this.temporaryChat}`);
   }
 
@@ -436,6 +440,8 @@ export class CopilotSession {
     this._turnCount++;
     const wantImages = opts?.generateImages ?? false;
     const images = opts?.images ?? [];
+    const turnContext = this.turnContext;
+    if (turnContext) return this.chatWithTurnContext(turnContext, text, model, signal, opts);
 
     // Which account this thread is on is fixed for its lifetime (§7.6): a
     // switch mid-thread must not retag a running thread's turns, or the thread
@@ -1101,6 +1107,378 @@ export class CopilotSession {
               const t = throttle.data.throttling;
               throttleInfo = { current: t.numUserMessagesInConversation, max: t.maxNumUserMessagesInConversation };
               log.info(`Throttle: ${t.numUserMessagesInConversation}/${t.maxNumUserMessagesInConversation} messages`);
+            }
+          }
+        }
+      }
+    });
+  }
+
+  private chatWithTurnContext(
+    context: TurnContext,
+    text: string,
+    model: string,
+    signal: AbortSignal | undefined,
+    opts: ChatTurnOptions | undefined,
+  ): Promise<CopilotStream> {
+    const isFirst = this._turnCount === 1;
+    const wantImages = opts?.generateImages ?? false;
+    const images = opts?.images ?? [];
+    const supports = (capability: string) => !wantImages || context.capabilities.includes(capability);
+    const requestId = crypto.randomUUID();
+    const tone = getToneForModel(model);
+    const sessionId = this.sessionId;
+    const conversationId = this.conversationId;
+    const agentId = this.agentId;
+    const nativeActions = this.nativeActions;
+
+    return new Promise((resolve, reject) => {
+      let answer = "";
+      const composer = new TurnTextComposer();
+      let receivedContent = false;
+      const queue: string[] = [];
+      let streamDone = false;
+      let streamError: Error | null = null;
+      let waiting: {
+        resolve: (result: IteratorResult<string>) => void;
+        reject: (err: Error) => void;
+      } | null = null;
+
+      const onDelta = (chunk: string) => {
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.resolve({ value: chunk, done: false });
+        } else {
+          queue.push(chunk);
+        }
+      };
+      const onDone = () => {
+        streamDone = true;
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.resolve({ value: undefined as any, done: true });
+        }
+      };
+      const onError = (err: Error) => {
+        streamError = err;
+        streamDone = true;
+        if (waiting) {
+          const w = waiting;
+          waiting = null;
+          w.reject(err);
+        }
+      };
+      const advance = (next: string) => {
+        const r = foldStreamText(answer, next);
+        if (r.answer !== answer) {
+          answer = r.answer;
+          receivedContent = true;
+        }
+        if (r.emit) onDelta(r.emit);
+      };
+
+      const stream: CopilotStream = {
+        get fullText() {
+          return answer;
+        },
+        get hasContent() {
+          return receivedContent;
+        },
+        get throttle() {
+          return null;
+        },
+        get contentOrigin() {
+          return null;
+        },
+        get messageType() {
+          return null;
+        },
+        get messageId() {
+          return null;
+        },
+        get scores() {
+          return null;
+        },
+        get turnCount() {
+          return null;
+        },
+        get turnState() {
+          return null;
+        },
+        get result() {
+          return null;
+        },
+        get metering() {
+          return null;
+        },
+        get images() {
+          return [];
+        },
+        get sawAction() {
+          return false;
+        },
+
+        [Symbol.asyncIterator]() {
+          return {
+            next(): Promise<IteratorResult<string>> {
+              if (queue.length > 0) {
+                return Promise.resolve({ value: queue.shift()!, done: false });
+              }
+              if (streamError) return Promise.reject(streamError);
+              if (streamDone) {
+                return Promise.resolve({ value: undefined as any, done: true });
+              }
+              return new Promise((res, rej) => {
+                waiting = { resolve: res, reject: rej };
+              });
+            },
+          };
+        },
+      };
+
+      const ws = new WebSocket(context.socketUrl, { headers: context.headers });
+      let handshakeDone = false;
+      let stopped = false;
+
+      const onAbort = () => {
+        if (stopped) return;
+        stopped = true;
+        try {
+          if (ws.readyState === WebSocket.OPEN && handshakeDone) {
+            ws.send(STOP_FRAME);
+            setTimeout(() => { try { ws.close(); } catch {} }, 2_000);
+          } else {
+            try { ws.close(); } catch {}
+          }
+        } catch {
+          try { ws.close(); } catch {}
+        }
+      };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+      const clearAbort = () => signal?.removeEventListener("abort", onAbort);
+
+      ws.on("open", () => {
+        ws.send(JSON.stringify({ protocol: "json", version: 1 }) + RS);
+      });
+
+      ws.on("message", (data: WebSocket.RawData) => {
+        const frames = data.toString().split(RS).filter((f) => f.length > 0);
+
+        for (const frame of frames) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(frame);
+          } catch {
+            if (!handshakeDone) {
+              handshakeDone = true;
+              sendChat();
+            }
+            continue;
+          }
+
+          if (!handshakeDone) {
+            handshakeDone = true;
+            const hs = SignalRHandshakeResponse.safeParse(parsed);
+            if (hs.success && hs.data.error) {
+              ws.close();
+              reject(new Error(`Handshake error: ${hs.data.error}`));
+              return;
+            }
+            sendChat();
+            continue;
+          }
+
+          handleMsg(parsed);
+        }
+      });
+
+      ws.on("error", (err: Error) => {
+        const msg = err.message || "connection failed";
+        if (!handshakeDone) {
+          reject(new Error(`WebSocket error: ${msg}`));
+        } else {
+          onError(new Error(`WebSocket error: ${msg}`));
+        }
+      });
+
+      ws.on("close", () => {
+        clearAbort();
+        onDone();
+      });
+
+      const sendChat = () => {
+        const args = {
+          ...context.payloadDefaults,
+          source: "officeweb",
+          clientCorrelationId: requestId,
+          sessionId,
+          optionsSets: [
+            ...(supports("code_interpreter") ? CODE_INTERPRETER_OPTIONS_SETS : []),
+            ...(wantImages ? IMAGE_GEN_OPTIONS_SETS : []),
+            ...(process.env.M365_EXTRA_OPTIONSSETS ? process.env.M365_EXTRA_OPTIONSSETS.split(",").map((s) => s.trim()).filter(Boolean) : []),
+          ],
+          streamingMode: "ConciseWithPadding",
+          spokenTextMode: "None",
+          options: {},
+          extraExtensionParameters: {},
+          allowedMessageTypes: [
+            "Chat",
+            "Suggestion",
+            "InternalSearchQuery",
+            "Disengaged",
+            "InternalLoaderMessage",
+            "Progress",
+            "RenderCardRequest",
+            "SemanticSerp",
+            "GenerateContentQuery",
+            "SearchQuery",
+            "ConfirmationCard",
+            "DeveloperLogs",
+            "EndOfRequest",
+            "ReferencesListComplete",
+            "GeneratedCode",
+            ...(wantImages ? ["GenerateGraphicArt"] : []),
+            ...(nativeActions ? ACTION_ALLOWED_MESSAGE_TYPES : []),
+          ],
+          sliceIds: [] as string[],
+          threadLevelGptId: agentId
+            ? { id: agentId, source: "MOS3" }
+            : {},
+          traceId: requestId,
+          isStartOfSession: isFirst,
+          clientInfo: {
+            clientPlatform: "mcmcopilot-web",
+            clientAppName: "Office",
+            clientEntrypoint: "mcmcopilot-officeweb",
+            clientSessionId: sessionId,
+            clientAppType: "Web",
+            deviceOS: "Linux",
+            deviceType: "Desktop",
+          },
+          message: {
+            author: "user",
+            inputMethod: "Keyboard",
+            text,
+            entityAnnotationTypes: [
+              "People",
+              "File",
+              "Event",
+              "Email",
+              "TeamsMessage",
+            ],
+            requestId,
+            locationInfo: { timeZoneOffset: 1, timeZone: "Europe/Copenhagen" },
+            locale: "en-gb",
+            messageType: "Chat",
+            experienceType: "Default",
+            adaptiveCards: [] as any[],
+            clientPreferences: {},
+            ...(images.length ? { messageAnnotations: images } : {}),
+          },
+          ...(agentId
+            ? {
+                gpts: [{
+                  id: agentId,
+                  source: "MOS3",
+                  version: "1.0.0",
+                  clientOverrides: {
+                    capabilities: nativeActions?.capabilities ?? [],
+                    "deepResearchModels@odata.type": "Collection(String)",
+                  },
+                }],
+              }
+            : {}),
+          ...(nativeActions?.gptDefinitions ? { gptDefinitions: nativeActions.gptDefinitions } : {}),
+          ...(nativeActions?.plugins
+            ? { plugins: nativeActions.plugins }
+            : (!agentId ? { plugins: [{ Id: "BingWebSearch", Source: "BuiltIn" }] } : {})),
+          ...(nativeActions
+            ? {
+                enableConfirmationDialogSkill: true,
+                enableAgentAutoInvoke: true,
+                enableMsgExtAuthSkill: true,
+                enablePPCAuthSkill: true,
+              }
+            : {}),
+          isSbsSupported: true,
+          tone: String(context.payloadDefaults.tone ?? tone),
+          renderReferencesBehindEOS: true,
+          disconnectBehavior: "continue",
+        };
+        const metrics = {
+          arguments: [
+            {
+              Timestamps: {
+                ConnectionStart: new Date().toISOString(),
+                UserInputStart: new Date().toISOString(),
+                ConnectionEstablished: new Date().toISOString(),
+                UserInputSubmit: new Date().toISOString(),
+              },
+            },
+          ],
+          target: "Metrics",
+          type: 1,
+        };
+        ws.send(JSON.stringify({ arguments: [args], invocationId: "0", target: "chat", type: 4 }) + RS + JSON.stringify(metrics) + RS);
+        resolve(stream);
+      };
+
+      function handleMsg(raw: unknown) {
+        const base = raw as { type?: number; target?: string; arguments?: unknown[] };
+
+        if (base.type === 6) {
+          ws.send(JSON.stringify({ type: 6 }) + RS);
+          return;
+        }
+
+        if (base.type === 7) {
+          const frame = CloseFrame.safeParse(raw);
+          if (frame.success && frame.data.error) {
+            onError(new Error(`Server close: ${frame.data.error}`));
+          }
+          ws.close();
+          return;
+        }
+
+        if (base.type === 3) {
+          const frame = CompletionFrame.safeParse(raw);
+          if (frame.success && frame.data.error) {
+            onError(new Error(`Completion error: ${frame.data.error}`));
+          }
+          ws.close();
+          return;
+        }
+
+        if (base.type === 2) {
+          ws.close();
+          return;
+        }
+
+        if (base.type === 1 && base.target === "update" && Array.isArray(base.arguments)) {
+          for (const arg of base.arguments) {
+            const delta = DeltaUpdate.safeParse(arg);
+            if (delta.success) {
+              composer.delta(delta.data.writeAtCursor);
+              advance(composer.text);
+              continue;
+            }
+
+            const msgUpdate = MessageUpdate.safeParse(arg);
+            if (msgUpdate.success) {
+              const cursorId = cursorMessageId(msgUpdate.data.cursor?.j);
+              if (cursorId) composer.cursor(cursorId);
+              for (const m of msgUpdate.data.messages) {
+                if (m.author === "bot" && m.text && !m.messageType) {
+                  composer.snapshot(m.messageId, m.text);
+                  advance(composer.text);
+                }
+              }
+              continue;
             }
           }
         }

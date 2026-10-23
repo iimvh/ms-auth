@@ -5746,3 +5746,37 @@ evening of RE burned it to 0 (15:xx–16:3xZ), reset 00:00Z. So: free tier works
 end (login → probe `claude-sonnet` → `/v1/chat/completions` 200 "ok" → gateway
 `/v1/messages` 200 "gateway-ok"), but ~80 turns/day is the real ceiling, shared by
 every probe — do NOT bench on a free personal account without counting turns.
+
+### F110 — the 30-minute idle eviction abandoned a live session; `M365_SESSION_IDLE_MS` is 60 min, and only real use touches a session 🟡 (unit-tested, not benched)
+
+`SessionPool` evicted any conversation idle > 30 min (`resolve` → `evictStale`), and
+that dropped the `ModelSession` behind it: the next request re-created one, so a live
+pi session that idled while the human read the last diff silently lost its M365
+conversation. It cost no turn, but it ended the session's continuity — the one thing
+`architecture-handoff.md` item 1 says a handoff may not do on the clock. A request at
+29 min did not help either: the frontier was the *last request*, and the touch
+(`lastAccessedAt = Date.now()`) ran *after* `evictStale` had already dropped the
+entry, so it never protected anything.
+
+Two changes, both in `handler.ts`: the TTL is 60 min
+(`M365_SESSION_IDLE_MS`, read per request), and only a genuine continuation
+(`messages.length > sentMessageCount`) touches a session — a re-sent request or
+opencode's keep-alive (same opener, nothing new) no longer keeps a dead conversation
+alive forever. A forgotten conversation is not re-discovered: the next request on
+that fingerprint is a new `ConversationState` with `sentMessageCount = 0`, so it
+gets the full history rather than a delta into an M365 thread that never saw it.
+The clock is also stamped when the turn *ends*, so a turn that outlived the window
+cannot make the session it just served look idle (unit tests: `streaming.test.ts`,
+"a long pi session must not lose its M365 conversation").
+
+A reset inside a turn (the Disengaged retry, the dead-agent re-send, the priority
+fallback) leaves `turnCount = 0` with `sentMessageCount = body.messages.length`, so
+the next request at that same length used to read as "not a continuation". The pool
+now marks that turn's count as a reset *baseline* (`lastSentIsReset`), and the next
+request continues the conversation the reset opened.
+
+Still open (handoff: "worth reviewing separately"): a conversation the harness
+stopped using is only forgotten when *some* request arrives after the TTL, so it
+holds a `ModelSession` (and its socket) until then. An interval sweeper was
+considered and not added — the pool is one process on one host with a handful of
+conversations, and the sweep would need its own clock under test for little gain.

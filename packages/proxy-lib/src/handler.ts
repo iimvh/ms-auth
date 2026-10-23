@@ -151,6 +151,10 @@ interface ConversationState {
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
+  /** The last completed turn started from a reset conversation (a fresh
+   *  newConversation(), or the pool's own reset), so its sentMessageCount is a
+   *  baseline: the next request at that same length continues it. */
+  lastSentIsReset: boolean;
   /** The model that last answered in this conversation. A different one (the
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
@@ -188,9 +192,28 @@ export function executedOnlyFirstNote(fabricated: boolean, droppedCalls: number,
 
 // --- Session pool: maps conversation fingerprint → M365 session ---
 
-const MAX_IDLE_MS = 30 * 60 * 1000; // evict after 30 min idle
+/**
+ * How long a conversation no request has continued may idle before the pool
+ * forgets it. Read per request (`M365_SESSION_IDLE_MS`), like the framing switch.
+ *
+ * This was 30 minutes, and a live pi session that idled longer — a human reading
+ * the last diff — came back to a dropped `ModelSession` and a fresh M365
+ * conversation: same harness history (it re-sends everything), but the
+ * conversation's continuity gone, and (docs/architecture-handoff.md item 1) a live
+ * session must not be abandoned on the clock. 60 minutes is the TTL: past it,
+ * turns already took the delta path instead of the full prompt, so a
+ * re-discovered session could continue on a history the new conversation never
+ * received — forgetting is the safe end. The conversation is not lost: the
+ * harness re-sends the full history, so the next turn re-opens it from scratch.
+ */
+const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
 
 export class SessionPool {
+  static idleMs(): number {
+    const env = Number(process.env.M365_SESSION_IDLE_MS);
+    return Number.isFinite(env) && env > 0 ? env : DEFAULT_SESSION_IDLE_MS;
+  }
+
   private conversations = new Map<string, ConversationState>();
   private sessionOptions: ModelSessionOptions;
 
@@ -210,6 +233,7 @@ export class SessionPool {
     const existing = this.conversations.get(fingerprint);
 
     if (existing) {
+      const before = existing.sentMessageCount;
       // A request that carries no more messages than this conversation already
       // sent is not its continuation (a harness re-sends the whole history and
       // only ever appends). It's a new session that shares the first user message
@@ -222,13 +246,25 @@ export class SessionPool {
       // already created and verified" in an empty directory — and the pass rate
       // fell 7/10 → 4/10 → 3/10 over the sweep. The full prompt re-sends the
       // whole history, so nothing the harness holds is lost.
-      if (messages.length <= existing.sentMessageCount) {
-        log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${existing.sentMessageCount} sent), starting a fresh M365 conversation`);
+      // A baseline rather than "the last request sent": the turn after a reset
+      // sends the full prompt and opens the conversation the reset began, so a
+      // request at that same length is that conversation's — not a new session
+      // that happens to share the opener. (The model-switch path owns its own
+      // reset flag; here the turn sends the full prompt.)
+      if (messages.length <= before && !existing.lastSentIsReset) {
+        log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${before} sent), starting a fresh M365 conversation`);
         existing.session.newConversation();
         existing.sentMessageCount = 0;
+        existing.lastSentIsReset = true;
         existing.pendingNote = null;
+      } else {
+        // A genuine continuation touches the clock; a re-sent request or a
+        // keep-alive (opencode repeats the opener with nothing new) must not
+        // keep a conversation the idle sweep would otherwise forget alive
+        // forever. The turn's own duration is not idleness either, which is why
+        // the clock is set again when the turn ends.
+        existing.lastAccessedAt = Date.now();
       }
-      existing.lastAccessedAt = Date.now();
       return existing;
     }
 
@@ -237,6 +273,7 @@ export class SessionPool {
     const state: ConversationState = {
       session: new ModelSession(this.sessionOptions),
       sentMessageCount: 0,
+      lastSentIsReset: false,
       pendingNote: null,
       lastAccessedAt: Date.now(),
     };
@@ -262,9 +299,10 @@ export class SessionPool {
 
   private evictStale() {
     const now = Date.now();
+    const idleMs = SessionPool.idleMs();
     for (const [key, state] of this.conversations) {
-      if (now - state.lastAccessedAt > MAX_IDLE_MS) {
-        log.info(`Evicting idle conversation ${key}`);
+      if (now - state.lastAccessedAt > idleMs) {
+        log.info(`Evicting idle conversation ${key} (idle > ${Math.round(idleMs / 1000)} s)`);
         this.conversations.delete(key);
       }
     }
@@ -379,6 +417,7 @@ export async function handleChatCompletion(
     log.info(`Conversation switches model ${conv.servedModel} → ${model}: fresh conversation, full history`);
     session.newConversation();
     conv.sentMessageCount = 0;
+    conv.lastSentIsReset = true;
   }
 
   // Which requests carry the declarative tool agent. GPT-the-chat-model won't
@@ -413,11 +452,16 @@ export async function handleChatCompletion(
   // M365 is stateful — it remembers everything from prior turns,
   // so we only need to send new messages after the first turn.
   const isFirstTurn = session.turnCount === 0;
+  // Whether this turn carries the full prompt rather than a delta. One predicate
+  // for the formatter, for what the pool remembers, and for whether the turn
+  // proved the session in use: M365's turnCount is 0 after any internal
+  // newConversation(), which an earlier turn may already have used and sent.
+  const sendFullHistory = isFirstTurn || conv.sentMessageCount === 0;
   const convId = session.conversationId;
   let text: string;
   // Images ride on the message that carries their text (core image-input.ts).
   let inputImages: string[];
-  if (isFirstTurn || conv.sentMessageCount === 0) {
+  if (sendFullHistory) {
     text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framingVariant);
     inputImages = imageUrls(body.messages);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=full, cid=${convId}`);
@@ -798,6 +842,15 @@ export async function handleChatCompletion(
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
   // can't be shown verbatim, so it stays fully buffered.
   async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
+  // The idle clock starts when the turn ENDS: a turn that outlived the window
+  // (a slow Opus turn, a lowered M365_SESSION_IDLE_MS) must not make the session
+  // it just served look idle to the next request.
+  const markUsed = () => {
+    // This turn carried the full prompt, so sentMessageCount is now the new
+    // conversation's baseline (not a reset's).
+    conv.lastSentIsReset = false;
+    conv.lastAccessedAt = Date.now();
+  };
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
     // A <tool_response> the model wrote itself is a stop sequence: everything
@@ -813,7 +866,7 @@ export async function handleChatCompletion(
     };
     const result = await runBuffered();
     if ("error" in result) return { kind: "error", resp: result.error };
-    conv.sentMessageCount = body.messages.length;
+    conv.sentMessageCount = body.messages.length; markUsed();
     let fullText = stopAtFabricatedResult(result.fullText);
 
     log.debug("Raw response (tool mode):", trunc(fullText, 1000));
@@ -846,7 +899,7 @@ export async function handleChatCompletion(
         : HALLUCINATION_FORCE_PROMPT;
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
-      conv.sentMessageCount = body.messages.length;
+      conv.sentMessageCount = body.messages.length; markUsed();
       fullText = stopAtFabricatedResult(retry.fullText);
       ({ parsed, judged } = parseReply(fullText, body.tools));
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
@@ -934,14 +987,16 @@ export async function handleChatCompletion(
       // the turn that carries the real result (executedOnlyFirstNote).
       const notes = [rewriteNote, executedOnlyFirstNote(cutFabricated, droppedCalls, textAfterFirstToolCall(fullText, body.tools).length)].filter(Boolean);
       conv.pendingNote = notes.length ? notes.join("\n") : null;
+      markUsed();
       return { kind: "tools", toolCalls: parsed.toolCalls };
     }
+    markUsed();
     return { kind: "text", text: fullText };
   } else {
     // No tools — stream deltas live (onDelta) while buffering for the retry logic.
     const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
-    conv.sentMessageCount = body.messages.length;
+    conv.sentMessageCount = body.messages.length; markUsed();
     return { kind: "text", text: result.fullText };
   }
   } // end produce()

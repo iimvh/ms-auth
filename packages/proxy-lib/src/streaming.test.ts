@@ -44,7 +44,7 @@ vi.mock("@m365-copilot/core", async (importActual) => {
     turnCount = 0;
     conversationId = "conv-test";
     reset() {}
-    newConversation() { this.conversationId = "conv-test-2"; this.turnCount = 0; scripted.newConversations++; }
+    newConversation() { this.conversationId = this.conversationId === "conv-test" ? "conv-test-2" : "conv-test"; this.turnCount = 0; scripted.newConversations++; }
     async refreshAgent() { return false; }
     async run(text: string, model?: string, signal?: AbortSignal, useAgent?: boolean, images: string[] = [], waitForBudget?: () => Promise<unknown>) {
       if (scripted.gate) await scripted.gate;
@@ -675,6 +675,161 @@ describe("GPT-6 Sol: agent on premium, learned fallback on non-premium (#23)", (
     // The fresh-conversation InternalError retry, still with the agent.
     expect(scripted.newConversations).toBe(1);
     expect(scripted.agentFlags).toEqual([true, true]);
+  });
+});
+
+describe("a long pi session must not lose its M365 conversation to the clock", () => {
+  const tools = [{ type: "function", function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } } }];
+  const opener = () => `fix the parser ${Math.random()}`;
+
+  afterEach(() => {
+    delete process.env.M365_SESSION_IDLE_MS;
+    scripted.queue = [];
+    scripted.result = null;
+  });
+
+  it("does NOT abandon a live session after 30 idle minutes (a human reading the last diff)", async () => {
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Done." }, { fullText: "Done again." }];
+    const pool = new SessionPool();
+    const text = opener();
+    const messages: any[] = [{ role: "user", content: text }];
+    const before = servedBy.length;
+    await handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages }), pool);
+    messages.push({ role: "assistant", content: "Done." });
+    messages.push({ role: "user", content: "now the other bug" });
+    // The idle window the old rediscovery evicted at.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 31 * 60_000);
+    await handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages }), pool);
+    vi.useRealTimers();
+    // Same ModelSession (uid), so the M365 conversation continued.
+    expect(servedBy.length - before).toBe(2);
+    expect(servedBy[before + 1]).toBe(servedBy[before]);
+    expect(pool.size).toBe(1);
+  });
+
+  it("defaults the idle window to 60 minutes and reads M365_SESSION_IDLE_MS", () => {
+    expect(SessionPool.idleMs()).toBe(60 * 60_000);
+    process.env.M365_SESSION_IDLE_MS = "600000";
+    expect(SessionPool.idleMs()).toBe(600_000);
+    // An interval of zero would evict every conversation on its next request.
+    process.env.M365_SESSION_IDLE_MS = "0";
+    expect(SessionPool.idleMs()).toBe(60 * 60_000);
+  });
+
+  it("does not count a turn's own duration against the next request", async () => {
+    // A turn that outlived the window (a long Opus turn, or a lowered TTL) must
+    // not make the session it just finished look idle: the clock starts when the
+    // turn ENDS, not when it began.
+    process.env.M365_SESSION_IDLE_MS = "60000";
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Done." }, { fullText: "Done." }];
+    const pool = new SessionPool();
+    const text = opener();
+    const before = servedBy.length;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const first = handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages: [{ role: "user", content: text }] }), pool);
+      vi.setSystemTime(Date.now() + 50_000);
+      await vi.advanceTimersByTimeAsync(0);
+      vi.setSystemTime(Date.now() + 30_000); // 80 s: the turn itself outlived the TTL
+      await first;
+      await handleChatCompletion(ChatCompletionRequest.parse({
+        model: "claude-sonnet", stream: false, tools,
+        messages: [{ role: "user", content: text }, { role: "assistant", content: "Done." }, { role: "user", content: "and now the other one" }],
+      }), pool);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(servedBy.length - before).toBe(2);
+    expect(servedBy[before + 1]).toBe(servedBy[before]);
+  });
+
+  it("a genuine continuation refreshes the clock; a keep-alive does not", async () => {
+    process.env.M365_SESSION_IDLE_MS = "60000";
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Done." }, { fullText: "Done." }, { fullText: "Done." }, { fullText: "Done." }];
+    const pool = new SessionPool();
+    const text = opener();
+    const before = servedBy.length;
+    const send = (extra: any[] = []) =>
+      handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages: [{ role: "user", content: text }, ...extra] }), pool);
+    await send();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 50_000);
+      await send([{ role: "assistant", content: "Done." }, { role: "user", content: "next" }]); // continuation → touches
+      vi.setSystemTime(Date.now() + 50_000); // 50 s since the continuation
+      await send(); // keep-alive: shares the opener, nothing new → must stay
+      await send([
+        { role: "assistant", content: "Done." }, { role: "user", content: "next" },
+        { role: "assistant", content: "Done again." }, { role: "user", content: "and next" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(servedBy.length - before).toBe(4);
+    for (let i = 1; i < 4; i++) expect(servedBy[before + i]).toBe(servedBy[before]);
+  });
+
+  it("keeps the session a Disengage retry just started, instead of replacing it next turn", async () => {
+    // The retry calls newConversation(), which makes turnCount 0, then stores
+    // sentMessageCount = body.messages.length. Without marking the reset as a
+    // reset, the next request at the same length reads as "not a continuation"
+    // and throws away the conversation the retry just opened (item 1).
+    // The empty turn is retried after the handler's own 2 s pause; use the fake
+    // clock (like respond) so the pause costs no wall-clock time.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      scripted.result = null;
+      scripted.queue = [{ fullText: "", messageType: "Disengaged" }, ...Array.from({ length: 6 }, (_, i) => ({ fullText: `Done ${i}.` }))];
+      const pool = new SessionPool();
+      const text = opener();
+      const before = servedBy.length;
+      const rotations = scripted.newConversations;
+      const send = (messages: any[]) => {
+        const pending = handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages }), pool);
+        return vi.runAllTimersAsync().then(() => pending);
+      };
+      const messages: any[] = [{ role: "user", content: text }];
+      await send(messages);
+      expect(scripted.newConversations - rotations).toBe(1); // the retry
+      messages.push({ role: "assistant", content: "Done." });
+      await send(messages);
+      messages.push({ role: "user", content: "and now the other one" });
+      await send(messages);
+
+      expect(scripted.newConversations - rotations).toBe(1); // no second, needless one
+      expect(pool.size).toBe(1);
+      expect(servedBy.length - before).toBeGreaterThanOrEqual(3);
+      expect(servedBy[before + 2]).toBe(servedBy[before]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reaps a conversation nothing is using, keep-alive requests excluded", async () => {
+    process.env.M365_SESSION_IDLE_MS = "60000";
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Done." }, { fullText: "Done." }, { fullText: "Done." }];
+    const pool = new SessionPool();
+    const text = opener();
+    const before = servedBy.length;
+    const send = (extra: any[] = []) =>
+      handleChatCompletion(ChatCompletionRequest.parse({ model: "claude-sonnet", stream: false, tools, messages: [{ role: "user", content: text }, ...extra] }), pool);
+    await send();
+    // opencode's keep-alive shares the opener but carries no new messages: it
+    // must not keep a finished session alive forever.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 50_000);
+    await send();
+    vi.setSystemTime(Date.now() + 61_000);
+    await send();
+    vi.useRealTimers();
+    expect(servedBy.length - before).toBe(3);
+    expect(servedBy[before + 1]).toBe(servedBy[before]); // keep-alive did not reap it
+    expect(servedBy[before + 2]).not.toBe(servedBy[before]); // real idleness did
   });
 });
 

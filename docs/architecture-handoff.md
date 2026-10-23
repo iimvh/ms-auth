@@ -172,6 +172,14 @@ Two follow-ups, in order:
    reviewing separately: `SessionPool` evicts an idle session at 30 minutes,
    which abandons a still-live M365 conversation (costs no turn, but ends a
    long session's continuity).
+
+   **Done (Oct 23).** The 30-minute idle eviction was that abandonment, and it
+   is gone: the TTL is 60 minutes (`M365_SESSION_IDLE_MS`) and only a genuine
+   continuation touches a session, so a pi session that idles while the human
+   reads the last diff keeps its M365 conversation. Past the TTL the
+   conversation is forgotten rather than re-discovered, because a forgotten
+   session's next request gets the full prompt — the delta path only has the
+   old one. See `docs/hypotheses.md` F110.
 2. **Measure tokens, then hand off.**
    - `usage.x_m365_prompt_tokens_est`: estimate the prompt actually sent
      (`messages` + `tools` + framed text, chars/4 or a real tokenizer). Offline,
@@ -188,6 +196,13 @@ Two follow-ups, in order:
      context underneath us.
 
 ### Limits differ by mode — handoff thresholds must too
+
+Thresholds (agreed; the measurement that sets them is item 2): ≤60% normal;
+60–80% warn (`x_m365_prompt_tokens_est` surfaced as a percentage); >80% hand
+off proactively with `newConversation()`. Those are the **enterprise** numbers;
+the per-mode split below lowers them on personal. A handoff itself costs no
+turn on either mode — it is the next turn that is counted — but it does start a
+new conversation.
 
 | Tier | Personal (free consumer) | Enterprise |
 |---|---|---|

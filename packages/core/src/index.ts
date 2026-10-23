@@ -166,8 +166,9 @@ export {
 } from "./model.js";
 
 export { isPersonalMode, resolveAuthMode, personalDefaultModel, personalModeDefaults, shouldSendCodeInterpreter, type AuthMode } from "./personal-mode.js";
-export { getPersonalToken, ensurePersonalCredentials, personalLoginCommand, PersonalAuthError, type PersonalAuthErrorCode } from "./personal-auth.js";
-export { PersonalStore, personalSessionFile, personalProfileDir, type PersonalCapture, type PersonalRecord } from "./personal-session.js";
+export { getPersonalToken, ensurePersonalCredentials, personalLoginCommand, PersonalAuthError, PERSONAL_AUTH_ERROR_CODES, type PersonalAuthErrorCode } from "./personal-auth.js";
+export { PERSONAL_MINT_RATE_LIMITS, PERSONAL_MINT_RATE_LIMIT_ENV, MINT_HOUR_MS, PersonalMintRateLimitOverrideSchema, personalMintRateLimits, type PersonalMintRateLimit, type PersonalMintRateLimitOverride } from "./personal-mint-limits.js";
+export { PersonalStore, personalSessionFile, personalProfileDir, PersonalCaptureSchema, PersonalRecordSchema, PersonalRecordProblemSchema, type PersonalCapture, type PersonalRecord, type PersonalRecordProblem, type PersonalRecordState } from "./personal-session.js";
 export { capturePersonalSession, parsePersonalCapture, isLoginUrl, frameText, hasChatFrame, PersonalCaptureError, decodeJwtExpiresAt, type PersonalCaptureErrorReason } from "./personal-capture.js";
 export { harvestPersonalToken, tokenFromSocketUrl, HarvestError, type HarvestErrorReason, type HarvestResult, type HarvestedPage } from "./personal-harvest.js";
 export { attachChatPage, personalCdpUrl } from "./personal-harvest-cdp.js";

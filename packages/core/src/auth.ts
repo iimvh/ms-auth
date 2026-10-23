@@ -36,6 +36,7 @@ export function getImageArtifactToken(): Promise<string | null> {
 import { createLogger } from "./log.js";
 import { getPersonalToken } from "./personal-auth.js";
 import { isPersonalMode } from "./personal-mode.js";
+import { z } from "zod/v4";
 const log = createLogger("auth");
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
@@ -58,12 +59,14 @@ const LOGIN_LOCALE = process.env.M365_LOGIN_LOCALE ?? "en-GB";
 const LOGIN_TIMEZONE = process.env.M365_LOGIN_TIMEZONE ?? "Europe/Copenhagen";
 
 /** Human completes SSO/MFA by hand (§13). Off by default: it opens a real window. */
-function interactiveApprovalEnabled(): boolean {
-  return process.env.M365_ENABLE_INTERACTIVE_APPROVAL === "1";
+export function interactiveLoginPermitted(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env[INTERACTIVE_APPROVAL_ENV] === "1" && env[NO_INTERACTIVE_ENV] !== "1";
 }
 
 function interactiveAllowed(): boolean {
-  return process.env.M365_NO_INTERACTIVE !== "1";
+  return process.env[NO_INTERACTIVE_ENV] !== "1";
 }
 
 function interactiveTimeoutMs(): number {
@@ -137,11 +140,20 @@ const LOGIN_USER_AGENT =
   process.env.M365_LOGIN_UA ??
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 
-interface Credentials {
+export interface Credentials {
   email: string;
   password: string;
   mfaSecret: string;
 }
+
+export const SecretsFileSchema = z.object({
+  email: z.string().min(1),
+  password: z.string().min(1),
+  mfaSecret: z.string().min(1),
+});
+
+export const INTERACTIVE_APPROVAL_ENV = "M365_ENABLE_INTERACTIVE_APPROVAL";
+export const NO_INTERACTIVE_ENV = "M365_NO_INTERACTIVE";
 
 /**
  * Resolve a usable Chromium executable. Playwright's bundled chrome-headless-shell
@@ -604,7 +616,7 @@ async function doForceReauth(): Promise<boolean> {
       return true;
     }
     const secrets = loadSecrets();
-    const canPromptHuman = interactiveApprovalEnabled() && interactiveAllowed();
+    const canPromptHuman = interactiveLoginPermitted();
     if (!secrets) {
       if (canPromptHuman) {
         log.info("forceReauth: no secrets file, asking for interactive approval");
@@ -633,15 +645,11 @@ async function doForceReauth(): Promise<boolean> {
   }
 }
 
-export function loadSecrets(): {
-  email: string;
-  password: string;
-  mfaSecret: string;
-} | null {
+export function loadSecrets(): Credentials | null {
   if (!existsSync(SECRETS_FILE)) return null;
   try {
-    const data = JSON.parse(readFileSync(SECRETS_FILE, "utf-8"));
-    if (data.email && data.password && data.mfaSecret) return data;
+    const parsed = SecretsFileSchema.safeParse(JSON.parse(readFileSync(SECRETS_FILE, "utf-8")));
+    if (parsed.success) return parsed.data;
   } catch {}
   return null;
 }
@@ -667,7 +675,7 @@ export async function getTokenForScope(scopes: string[]): Promise<string | null>
   // Silent unavailable — fall back to automated browser login with stored creds,
   // then to a human if that's enabled (§13).
   const secrets = loadSecrets();
-  const canPromptHuman = interactiveApprovalEnabled() && interactiveAllowed();
+  const canPromptHuman = interactiveLoginPermitted();
   if (!secrets) return canPromptHuman ? loginInteractiveForScopes(scopes) : null;
   try {
     return await runBrowserLogin(app, scopes, secrets);
@@ -702,7 +710,7 @@ async function doGetToken(): Promise<string> {
   // tab — so the human-in-the-loop path stays strictly opt-in via
   // M365_ENABLE_INTERACTIVE_APPROVAL=1, which is the caller asserting a display
   // exists. M365_NO_INTERACTIVE=1 vetoes it regardless (§13).
-  const canPromptHuman = interactiveApprovalEnabled() && interactiveAllowed();
+  const canPromptHuman = interactiveLoginPermitted();
   if (!secrets) {
     if (canPromptHuman) return loginInteractiveForScopes(SCOPES);
     throw new Error(

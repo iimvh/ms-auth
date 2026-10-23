@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { z } from "zod/v4";
 import { resolveAccount } from "./account-registry.js";
 import { createLogger } from "./log.js";
 
@@ -55,6 +56,30 @@ function missingRecordFields(value: unknown): string[] {
   if (typeof r.expiresAt !== "number") problems.push("expiresAt");
   return problems;
 }
+
+export const PersonalCaptureSchema = z.object({
+  accessToken: z.string(),
+  chathubPath: z.string(),
+  scenario: z.string(),
+  variants: z.string(),
+  licenseType: z.string(),
+  agentHost: z.string(),
+  product: z.string().nullable(),
+  source: z.string(),
+  optionsSets: z.array(z.string()),
+  allowedMessageTypes: z.array(z.string()),
+  expiresAt: z.number(),
+  capturedAt: z.number(),
+});
+
+export const PersonalRecordSchema = PersonalCaptureSchema.extend({
+  emailHint: z.string().nullable(),
+  probe: z.object({ model: z.string(), ok: z.boolean(), at: z.number() }).nullable(),
+  mintCount: z.number(),
+  lastMintAt: z.number(),
+});
+
+export const PersonalRecordProblemSchema = z.enum(["absent", "unreadable", "invalid_json", "wrong_shape"]);
 
 /** Why a stored record could not be used. `absent` is the ordinary "nothing has
  *  been captured yet"; the rest mean a file IS there but cannot be trusted, and

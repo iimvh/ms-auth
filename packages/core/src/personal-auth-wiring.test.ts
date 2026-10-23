@@ -6,6 +6,15 @@ import { PersonalStore } from "./personal-session.js";
 import { personalProfileDir } from "./personal-session.js";
 import { getPersonalToken } from "./personal-auth.js";
 
+vi.mock("./personal-harvest.js", () => {
+  class HarvestError extends Error {
+    constructor(readonly reason: string, message: string) {
+      super(message);
+    }
+  }
+  return { HarvestError, isHarvestError: (err: unknown) => err instanceof HarvestError };
+});
+
 vi.mock("./personal-capture.js", () => ({
   PersonalCaptureError: class extends Error {},
   capturePersonalSession: vi.fn(async () => ({

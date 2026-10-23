@@ -5,16 +5,25 @@ import type { PersonalCapture, PersonalRecord, PersonalRecordState } from "./per
 import { PersonalStore } from "./personal-session.js";
 import { resolveAccount, type AccountId } from "./account-registry.js";
 import { createLogger } from "./log.js";
+import {
+  MINT_HOUR_MS,
+  PERSONAL_MINT_RATE_LIMIT_ENV,
+  personalMintRateLimits,
+  type PersonalMintRateLimitOverride,
+} from "./personal-mint-limits.js";
 
 const log = createLogger("personal-auth");
 
-export type PersonalAuthErrorCode =
-  | "session_dead"
-  | "mint_rate_limited"
-  | "capture_failed"
-  | "chrome_unreachable"
-  | "no_chat_tab"
-  | "mint_not_rotated";
+export const PERSONAL_AUTH_ERROR_CODES = [
+  "session_dead",
+  "mint_rate_limited",
+  "capture_failed",
+  "chrome_unreachable",
+  "no_chat_tab",
+  "mint_not_rotated",
+] as const;
+
+export type PersonalAuthErrorCode = (typeof PERSONAL_AUTH_ERROR_CODES)[number];
 
 export class PersonalAuthError extends Error {
   constructor(
@@ -42,12 +51,9 @@ export interface PersonalAuthDeps {
   /** Absent means "no harvest available" (tests, and a deliberate capture-only
    *  mint when M365_PERSONAL_MINT_STRATEGY=capture). */
   harvest?: (prev: PersonalRecord) => Promise<{ capture: PersonalCapture; rotated: boolean } | null>;
+  rateLimits?: PersonalMintRateLimitOverride;
   now: () => number;
 }
-
-const DEFAULT_MINT_MIN_INTERVAL_MS = 600_000;
-const DEFAULT_MINT_MAX_PER_HOUR = 3;
-const HOUR = 3_600_000;
 
 export function personalLoginCommand(): string {
   return "pnpm m365-personal login";
@@ -103,9 +109,10 @@ function mintRateLimitedError(kind: "interval" | "hour"): PersonalAuthError {
     kind === "interval"
       ? "the previous mint was less than the minimum mint interval ago"
       : "the hourly mint budget is exhausted";
+  const limits = personalMintRateLimits();
   return new PersonalAuthError(
     "mint_rate_limited",
-    `refusing to mint a fresh personal token: ${what} (the record is stale but not dead). Use M365_PERSONAL_MINT_MIN_INTERVAL_MS / M365_PERSONAL_MINT_MAX_PER_HOUR to tune, or ${personalLoginCommand()} to mint by hand.`,
+    `refusing to mint a fresh personal token: ${what} (the record is stale but not dead). Use ${PERSONAL_MINT_RATE_LIMIT_ENV.minIntervalMs} / ${PERSONAL_MINT_RATE_LIMIT_ENV.maxPerHour} to tune (currently ${limits.minIntervalMs} / ${limits.maxPerHour}), or ${personalLoginCommand()} to mint by hand.`,
   );
 }
 
@@ -203,14 +210,13 @@ async function mint(d: PersonalAuthDeps, prev: PersonalRecord | null): Promise<s
   if (current && current !== prev && d.store.isFresh(current, d.now())) return current.accessToken;
 
   const now = d.now();
-  const minInterval = Number(process.env.M365_PERSONAL_MINT_MIN_INTERVAL_MS ?? DEFAULT_MINT_MIN_INTERVAL_MS);
-  const maxPerHour = Number(process.env.M365_PERSONAL_MINT_MAX_PER_HOUR ?? DEFAULT_MINT_MAX_PER_HOUR);
+  const { minIntervalMs, maxPerHour } = personalMintRateLimits(process.env, d.rateLimits);
   if (prev) {
-    if (now - prev.lastMintAt < minInterval) {
+    if (now - prev.lastMintAt < minIntervalMs) {
       log.debug(`mint refused: only ${Math.round((now - prev.lastMintAt) / 1000)}s since the last mint`);
       throw mintRateLimitedError("interval");
     }
-    const mintsLastHour = now - prev.lastMintAt < HOUR ? prev.mintCount : 0;
+    const mintsLastHour = now - prev.lastMintAt < MINT_HOUR_MS ? prev.mintCount : 0;
     if (mintsLastHour >= maxPerHour) {
       log.debug(`mint refused: ${mintsLastHour} mints in the last hour (max ${maxPerHour})`);
       throw mintRateLimitedError("hour");
@@ -227,7 +233,7 @@ async function mint(d: PersonalAuthDeps, prev: PersonalRecord | null): Promise<s
     // A harvest spends a turn whether or not the token changed — a send usually
     // yields a new token (5/6 rounds, F111) but not always. Budgeting the send,
     // not the rotation, is what keeps the account from being hammered.
-    mintCount: (prev ? (now - prev.lastMintAt < HOUR ? prev.mintCount : 0) : 0) + (spentTurn ? 1 : 0),
+    mintCount: (prev ? (now - prev.lastMintAt < MINT_HOUR_MS ? prev.mintCount : 0) : 0) + (spentTurn ? 1 : 0),
     lastMintAt: spentTurn ? mintedAt : (prev?.lastMintAt ?? mintedAt),
   };
   d.store.write(record);

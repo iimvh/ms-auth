@@ -1,8 +1,15 @@
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PersonalStore, type PersonalRecord } from "./personal-session.js";
+import {
+  PersonalCaptureSchema,
+  PersonalRecordProblemSchema,
+  PersonalRecordSchema,
+  PersonalStore,
+  type PersonalRecord,
+  type PersonalRecordState,
+} from "./personal-session.js";
 
 const record = (over: Partial<PersonalRecord> = {}): PersonalRecord => ({
   accessToken: "tok-1", chathubPath: "oid@tid", scenario: "OfficeWebPaidConsumerCopilot",
@@ -59,5 +66,49 @@ describe("PersonalStore", () => {
     store.write(record());
     store.delete();
     expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe("a stored record's state", () => {
+  it("has exactly the four problems, and each one is what inspect() reports for its file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ps-"));
+    const stateOf = (content: string | null, path = join(dir, "s.json")): PersonalRecordState => {
+      if (content !== null) writeFileSync(path, content);
+      return new PersonalStore(path).inspect();
+    };
+    const states: Record<string, PersonalRecordState> = {
+      absent: stateOf(null, join(dir, "missing.json")),
+      unreadable: stateOf(null, dir),
+      invalid_json: stateOf('{"accessToken":"tok"'),
+      wrong_shape: stateOf(JSON.stringify({ accessToken: "tok" })),
+    };
+    expect(Object.keys(states).sort()).toEqual([...PersonalRecordProblemSchema.options].sort());
+    for (const [problem, state] of Object.entries(states)) {
+      expect(state.ok).toBe(false);
+      expect(state).toMatchObject({ problem });
+    }
+    const usable = stateOf(JSON.stringify(record()));
+    expect(usable.ok).toBe(true);
+    expect(usable).toMatchObject({ record: { accessToken: "tok-1" } });
+  });
+});
+
+describe("PersonalRecordSchema", () => {
+  it("accepts a written record and rejects each field whose type changes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ps-"));
+    const store = new PersonalStore(join(dir, "s.json"));
+    store.write(record());
+    const written = JSON.parse(readFileSync(store.path, "utf8")) as unknown;
+    expect(PersonalRecordSchema.safeParse(written).success).toBe(true);
+    expect(PersonalCaptureSchema.safeParse(record()).success).toBe(true);
+
+    const broken: Record<keyof PersonalRecord, unknown> = {
+      accessToken: 1, chathubPath: null, scenario: false, variants: [], licenseType: 0, agentHost: {},
+      product: undefined, source: 1, optionsSets: "s", allowedMessageTypes: {}, expiresAt: "1e3",
+      capturedAt: null, emailHint: 7, probe: { model: "m", ok: "yes", at: 0 }, mintCount: "1", lastMintAt: null,
+    };
+    for (const [field, value] of Object.entries(broken)) {
+      expect({ field, accepted: PersonalRecordSchema.safeParse({ ...record(), [field]: value }).success }).toEqual({ field, accepted: false });
+    }
   });
 });

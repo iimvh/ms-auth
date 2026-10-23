@@ -29,6 +29,7 @@ import {
   useMockRegistry,
   writeRegistry,
   type AccountRegistry,
+  type ResolvedAccount,
 } from "./account-registry.js";
 import { PersonalStore, personalProfileDir, personalSessionFile } from "./personal-session.js";
 import { personalCdpUrl } from "./personal-harvest-cdp.js";
@@ -62,6 +63,7 @@ afterEach(() => {
   // clearMockRegistry drops M365_ACCOUNT_HOME too; put this file's home back so
   // no later test (or a second useMockRegistry) runs against the real dir.
   process.env.M365_ACCOUNT_HOME = home;
+  delete process.env.M365_PERSONAL_CDP_URL;
 });
 
 const registry = (accounts: AccountRegistry["accounts"], activeId = accounts[0]?.id ?? "default"): AccountRegistry =>
@@ -462,6 +464,30 @@ describe("resolveAccount", () => {
     process.env.M365_ACCOUNTS_FILE = file;
     writeFileSync(file, "{ not json");
     expect(resolveAccount().source).toBe("builtin");
+  });
+});
+
+describe("which account is active", () => {
+  const PRIORITY: ResolvedAccount["source"][] = ["cli", "env", "registry", "builtin"];
+  const OVERRIDE_VARS = ["M365_PERSONAL_CDP_URL", "M365_PERSONAL_PROFILE", "M365_PERSONAL_SESSION_FILE"];
+  const clearOverrides = () => OVERRIDE_VARS.forEach((name) => delete process.env[name]);
+
+  it("resolves by precedence: a CLI id, then env overrides, then the registry, then the builtin layout", () => {
+    const seen: ResolvedAccount["source"][] = [];
+    try {
+      clearOverrides();
+      useMockRegistry([{ id: "default" }, { id: "work", cdpPort: 9223 }]);
+      seen.push(resolveAccount({ id: "work" }).source);
+      process.env.M365_PERSONAL_CDP_URL = "http://127.0.0.1:9999";
+      seen.push(resolveAccount({}).source);
+      clearOverrides();
+      seen.push(resolveAccount({}).source);
+      process.env.M365_ACCOUNTS_FILE = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+      seen.push(resolveAccount({}).source);
+    } finally {
+      clearOverrides();
+    }
+    expect(seen).toEqual(PRIORITY);
   });
 });
 

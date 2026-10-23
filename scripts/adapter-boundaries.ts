@@ -96,15 +96,20 @@ function candidatePaths(file: string, specifier: string): string[] {
   return [base, `${stem}.ts`, `${stem}.tsx`, `${stem}/index.ts`];
 }
 
-function resolveSpecifier(file: string, specifier: string): string | null {
-  if (!specifier.startsWith(".")) return null;
-  return candidatePaths(file, specifier).find((candidate) => existsSync(candidate)) ?? null;
+function resolveFromRepoRoot(specifier: string, repoRoot: string): string | null {
+  const base = resolve(repoRoot, specifier);
+  return RESOLVE_SUFFIXES.map((suffix) => base + suffix).find((candidate) => existsSync(candidate)) ?? null;
+}
+
+function resolveSpecifier(file: string, specifier: string, repoRoot: string): string | null {
+  if (specifier.startsWith(".")) return candidatePaths(file, specifier).find((candidate) => existsSync(candidate)) ?? null;
+  return resolveFromRepoRoot(specifier, repoRoot);
 }
 
 export function importEdges(file: string, repoRoot: string): ImportEdge[] {
   const from = toPosix(relative(repoRoot, file));
   return importedSpecifiers(readFileSync(file, "utf8")).map(({ specifier, line }) => {
-    const target = resolveSpecifier(file, specifier);
+    const target = resolveSpecifier(file, specifier, repoRoot);
     return { from, to: target ? toPosix(relative(repoRoot, target)) : specifier, specifier, line };
   });
 }

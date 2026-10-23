@@ -135,6 +135,17 @@ describe("adapter boundary", () => {
     });
     expect(run(["--check"], { repoRoot: root, ...silent })).toBe(1);
   });
+
+  it("catches a cross-import written from a subdirectory at the same depth as an adapter", () => {
+    const root = fixture({
+      "zz-probe/probe.ts": `import { personal } from "../adapters/personal/personal.js";\n`,
+      [`${ADAPTER_ROOT}/personal/personal.ts`]: "export const personal = 1;\n",
+      [`${ADAPTER_ROOT}/msal/token.ts`]: "export const token = 1;\n",
+    });
+    const graph = buildGraph({ coreSrcDir: join(root, CORE_SRC), adapterRoot: ADAPTER_ROOT });
+    const probe = graph.edges.filter((edge) => edge.from === `${CORE_SRC}/zz-probe/probe.ts`);
+    expect(probe.map((edge) => edge.to)).toEqual([`${ADAPTER_ROOT}/personal/personal.ts`]);
+  });
 });
 
 describe("dependency graph baseline", () => {

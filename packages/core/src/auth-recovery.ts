@@ -117,34 +117,65 @@ export function createBackoffController(opts: BackoffOptions): BackoffController
 const disabled = () =>
   !!(process.env.M365_NO_BACKOFF ?? process.env.M365_NO_AUTO_REAUTH); // legacy alias
 
-const defaultController = createBackoffController({
-  windowMs: Number(process.env.M365_BACKOFF_WINDOW_MS ?? 120_000),
-  threshold: Number(process.env.M365_BACKOFF_THRESHOLD ?? process.env.M365_REAUTH_EMPTY_THRESHOLD ?? 3),
-  baseCooldownMs: Number(process.env.M365_BACKOFF_BASE_MS ?? 90_000),
-  maxCooldownMs: Number(process.env.M365_BACKOFF_MAX_MS ?? 600_000),
-  onTrigger: ({ distinctConversations, cooldownMs, level }) =>
-    log.info(
-      `Degradation backoff (level ${level}): ${distinctConversations} empty responses across distinct ` +
-      `conversations — pacing new turns for ~${Math.round(cooldownMs / 1000)}s to let the account self-heal ` +
-      `(H-R1: a re-login would NOT clear this and would raise our detection profile). Disable with M365_NO_BACKOFF=1.`,
-    ),
-});
+/** One controller's env-driven options. Every account gets its own copy, so
+ *  the policy (and the env tuning) is identical and the state is not. */
+function controllerOptions(account: string | null): BackoffOptions {
+  return {
+    windowMs: Number(process.env.M365_BACKOFF_WINDOW_MS ?? 120_000),
+    threshold: Number(process.env.M365_BACKOFF_THRESHOLD ?? process.env.M365_REAUTH_EMPTY_THRESHOLD ?? 3),
+    baseCooldownMs: Number(process.env.M365_BACKOFF_BASE_MS ?? 90_000),
+    maxCooldownMs: Number(process.env.M365_BACKOFF_MAX_MS ?? 600_000),
+    onTrigger: ({ distinctConversations, cooldownMs, level }) => {
+      const whose = account ? `account "${account}"` : "the account";
+      log.info(
+        `Degradation backoff (level ${level}): ${distinctConversations} empty responses across distinct ` +
+        `conversations on ${whose} — pacing new turns for ~${Math.round(cooldownMs / 1000)}s to let it self-heal ` +
+        `(H-R1: a re-login would NOT clear this and would raise our detection profile). Disable with M365_NO_BACKOFF=1.`,
+      );
+    },
+  };
+}
 
-/** Record a request outcome for the global degradation-backoff policy. No-op if disabled. */
-export function noteRequestOutcome(empty: boolean, conversationId: string): void {
+// One controller per account (§7.7): a throttled account must not slow another
+// down — that is the whole point of running two of them. The builtin layout (no
+// account) is one more key and behaves exactly as one process-wide controller did.
+const controllers = new Map<string, BackoffController>();
+
+function controllerFor(accountId?: string | null): BackoffController {
+  const key = accountId ?? "builtin";
+  let c = controllers.get(key);
+  if (!c) {
+    c = createBackoffController(controllerOptions(accountId ?? null));
+    controllers.set(key, c);
+  }
+  return c;
+}
+
+/** Record a request outcome for one account's degradation-backoff policy. No-op if disabled. */
+export function noteRequestOutcome(empty: boolean, conversationId: string, accountId?: string | null): void {
   if (disabled()) return;
-  defaultController.note(empty, conversationId);
+  controllerFor(accountId).note(empty, conversationId);
 }
 
 /** Await a paced slot before a backend turn (self-imposed rate limit while degraded).
  *  Resolves immediately when healthy or when backoff is disabled. */
-export async function awaitDegradationBackoff(): Promise<void> {
+export async function awaitDegradationBackoff(accountId?: string | null): Promise<void> {
   if (disabled()) return;
-  const slept = await defaultController.waitForSlot();
-  if (slept > 0) log.info(`Backoff: paced this turn by ${Math.round(slept / 1000)}s (account degraded)`);
+  const slept = await controllerFor(accountId).waitForSlot();
+  if (slept > 0) log.info(`Backoff: paced this turn by ${Math.round(slept / 1000)}s (${accountId ? `account "${accountId}"` : "account"} degraded)`);
 }
 
-/** Whether the global policy is currently backing off. */
-export function isDegradationBackoff(): boolean {
-  return !disabled() && defaultController.isBackingOff();
+/** Whether that account's policy is currently backing off. */
+export function isDegradationBackoff(accountId?: string | null): boolean {
+  return !disabled() && controllerFor(accountId).isBackingOff();
+}
+
+/** Drop an account's backoff state (it was removed, or its record changed). */
+export function forgetAccountBackoff(accountId: string): void {
+  controllers.delete(accountId);
+}
+
+/** Only for tests: forget every controller, so no case inherits another's state. */
+export function resetBackoffState(): void {
+  controllers.clear();
 }

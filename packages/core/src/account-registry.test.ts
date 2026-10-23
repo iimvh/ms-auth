@@ -333,7 +333,8 @@ describe("account CRUD", () => {
   });
 
   it("refuses to remove the active account or the last one", () => {
-    useMockRegistry([{ id: "default" }, { id: "work" }], "work");
+    useMockRegistry([{ id: "default" }, { id: "work" }]);
+    activateAccount("work");
     try { removeAccount("work"); } catch (e) { expect((e as AccountError).code).toBe("active"); }
     // A fresh home, so the previous test's `work` cannot make `only` non-last.
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));

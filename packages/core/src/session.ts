@@ -30,6 +30,7 @@ import { isPersonalMode, shouldSendCodeInterpreter } from "./personal-mode.js";
 import { PersonalAuthError, personalLoginCommand } from "./personal-auth.js";
 import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
 import { PersonalStore, personalSessionFile } from "./personal-session.js";
+import { resolveAccount } from "./account-registry.js";
 
 const RS = "\x1E";
 const log = createLogger("session");
@@ -377,6 +378,9 @@ export class CopilotSession {
   private sessionId: string;
   private conversationId: string;
   private _turnCount = 0;
+  /** The account this thread runs on, resolved on its first turn and fixed for
+   *  the thread's lifetime (§7.6); null = the builtin layout or MSAL mode. */
+  private _accountId: string | null | undefined;
   private agentId?: string;
   private nativeActions?: NativeActionConfig;
   private temporaryChat: boolean;
@@ -406,8 +410,17 @@ export class CopilotSession {
     const wantImages = opts?.generateImages ?? false;
     const images = opts?.images ?? [];
 
-    log.info(`Chat turn ${this._turnCount - 1}: model=${model}, isFirst=${isFirst}, text=${JSON.stringify(trunc(text, 200))}`);
-    recordTurn(); // the throttle-avoidance bucket counts what that line counts (turn-budget.ts)
+    // Which account this thread is on is fixed for its lifetime (§7.6): a
+    // switch mid-thread must not retag a running thread's turns, or the thread
+    // would be silently re-routed. `chat()` runs before the stream reader that
+    // spends the turns, so the field is set by then; the reader's `this` is not
+    // the session, so the value is captured here.
+    this._accountId ??= isPersonalMode() ? resolveAccount().id : null;
+    const accountId = this._accountId;
+    const accountTag = accountId ? ` account=${accountId}` : "";
+
+    log.info(`Chat turn ${this._turnCount - 1}: model=${model}, isFirst=${isFirst}, text=${JSON.stringify(trunc(text, 200))}${accountTag}`);
+    recordTurn(undefined, accountId); // the throttle-avoidance bucket counts what that line counts (turn-budget.ts)
 
     const requestId = crypto.randomUUID();
     const personal = isPersonalMode() ? readPersonalRecord() : null;
@@ -970,8 +983,8 @@ export class CopilotSession {
                 ...(typeof item.result.errorCode === "string" ? { errorCode: item.result.errorCode } : {}),
                 ...(typeof item.result.message === "string" ? { message: item.result.message } : {}),
               };
-              if (item.result.value !== "Success") log.info(`Turn result: ${item.result.value}${serverResult.errorCode ? ` (${serverResult.errorCode})` : ""}`);
-              if (item.result.value === "Throttled") recordThrottle();
+              if (item.result.value !== "Success") log.info(`Turn result: ${item.result.value}${serverResult.errorCode ? ` (${serverResult.errorCode})` : ""}${accountId ? ` account=${accountId}` : ""}`);
+              if (item.result.value === "Throttled") recordThrottle(Date.now(), accountId);
             }
             if (item.turnState) turnState = item.turnState;
             if (item.throttling) {

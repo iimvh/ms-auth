@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createBackoffController } from "./auth-recovery.js";
+import { awaitDegradationBackoff, createBackoffController, forgetAccountBackoff, isDegradationBackoff, noteRequestOutcome } from "./auth-recovery.js";
 
 function setup(overrides: Record<string, unknown> = {}) {
   let t = 0;
@@ -120,5 +120,41 @@ describe("createBackoffController", () => {
     advance(4000); // 1000ms remaining, but jitter wants 3000
     const delay = await controller.waitForSlot();
     expect(delay).toBe(1000); // capped at remaining
+  });
+});
+
+let seq = 0;
+// The policy keys on distinct conversations; a unique id keeps one case's
+// empties from counting for another.
+const conv = () => `conv-${seq++}`;
+
+describe("per-account degradation backoff", () => {
+  it("a throttled account does not slow another one down", async () => {
+    for (let i = 0; i < 3; i++) noteRequestOutcome(true, conv(), "acct-a");
+    expect(isDegradationBackoff("acct-a")).toBe(true);
+    expect(isDegradationBackoff("acct-b")).toBe(false);
+    const t0 = Date.now();
+    await awaitDegradationBackoff("acct-b");
+    expect(Date.now() - t0).toBeLessThan(1000);
+    noteRequestOutcome(false, conv(), "acct-a"); // clean: lifts its own window
+    expect(isDegradationBackoff("acct-a")).toBe(false);
+  });
+
+  it("with no account key the behaviour is today's single shared policy", async () => {
+    for (let i = 0; i < 3; i++) noteRequestOutcome(true, conv());
+    expect(isDegradationBackoff()).toBe(true);
+    expect(isDegradationBackoff(null)).toBe(true);
+    noteRequestOutcome(false, conv());
+    expect(isDegradationBackoff()).toBe(false);
+  });
+
+  it("forgetAccountBackoff drops one account and leaves the rest", async () => {
+    for (let i = 0; i < 3; i++) noteRequestOutcome(true, conv(), "acct-c");
+    for (let i = 0; i < 3; i++) noteRequestOutcome(true, conv(), "acct-d");
+    expect(isDegradationBackoff("acct-c")).toBe(true);
+    forgetAccountBackoff("acct-c");
+    expect(isDegradationBackoff("acct-c")).toBe(false);
+    expect(isDegradationBackoff("acct-d")).toBe(true);
+    forgetAccountBackoff("acct-d");
   });
 });

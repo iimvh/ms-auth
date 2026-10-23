@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   awaitTurnBudget,
   budgetConfig,
+  parseEvents,
   proxyBudgetStatus,
   readLogEvents,
   recordThrottle,
@@ -291,5 +292,27 @@ describe("awaitTurnBudget's line (#77)", () => {
     front.release();
     expect((await front.done).waitedMs).toBe(10 * 60_000);
     expect((await next).waitedMs).toBe(10 * 60_000); // decided only once the front had
+  });
+});
+
+describe("account-tagged turn events", () => {
+  it("counts one account's turns only against that account", () => {
+    const log = [
+      "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a account=work",
+      "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a account=work",
+      "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a",
+    ].join("\n");
+    expect(parseEvents(log, "work")).toHaveLength(2);
+    expect(parseEvents(log)).toHaveLength(1); // untagged lines belong to the builtin layout
+  });
+
+  it("an untagged log (written before this change) still counts", () => {
+    expect(parseEvents("[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a")).toHaveLength(1);
+  });
+
+  it("tags a throttle line the same way", () => {
+    const log = "[2026-10-23T05:00:00.000Z] [INFO] [session] Turn result: Throttled (PerUserThrottled) account=work";
+    expect(parseEvents(log, "work")).toEqual([expect.objectContaining({ kind: "throttled" })]);
+    expect(parseEvents(log, "other")).toEqual([]);
   });
 });

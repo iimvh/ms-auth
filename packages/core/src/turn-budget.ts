@@ -71,6 +71,9 @@ export interface BudgetEvent {
   kind: "turn" | "throttled";
   /** Identifies the event across files: the same log line seen twice counts once. */
   line: string;
+  /** The personal account the turn was spent on (§7.6); null/absent = the
+   *  builtin layout, or a log line written before the account tag existed. */
+  account?: string | null;
 }
 
 export interface BudgetState {
@@ -112,15 +115,26 @@ export function budgetConfig(env: Record<string, string | undefined> = process.e
   };
 }
 
-const EVENT = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] \[\w+\] \[session\] (Chat turn|Turn result: Throttled)/gm;
+// The account tag is appended LAST, so a line without one — every line written
+// before this change — still matches, and the untagged `Chat turn` form is
+// exactly what the builtin layout counted before. A tagged line belongs to
+// exactly one account.
+const EVENT = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] \[\w+\] \[session\] (Chat turn|Turn result: Throttled)(?:[^\n]*?\baccount=([a-z0-9][a-z0-9-]{0,31}))?/gm;
 const LOG_FILE = /debug.*\.log$/;
 const SKIP_DIR = /^(browser-profile|node_modules)$|frames/;
 
-/** Turn and throttle events in log text. */
-export function parseEvents(text: string): BudgetEvent[] {
+/**
+ * Turn and throttle events in log text, for one account. `accountId`
+ * undefined/null selects the builtin layout's events — the untagged ones — so a
+ * single-account setup counts exactly what it counted before.
+ */
+export function parseEvents(text: string, accountId?: string | null): BudgetEvent[] {
+  const want = accountId ?? null;
   const out: BudgetEvent[] = [];
   for (const m of text.matchAll(EVENT)) {
-    out.push({ t: Date.parse(m[1]!), kind: m[2] === "Chat turn" ? "turn" : "throttled", line: m[0] });
+    const account = m[3] ?? null;
+    if (account !== want) continue;
+    out.push({ t: Date.parse(m[1]!), kind: m[2] === "Chat turn" ? "turn" : "throttled", line: m[0], account });
   }
   return out;
 }
@@ -245,15 +259,21 @@ export function decide(state: Pick<BudgetState, "level" | "lastThrottle">, need:
 }
 
 /**
- * The bucket at `nowMs`, read back as far as it takes to find where it was last
- * full (see replay). `extra` are events no log holds (the proxy's own, see below).
+ * The bucket at `nowMs` for one account, read back as far as it takes to find
+ * where it was last full (see replay). `extra` are events no log holds (the
+ * proxy's own, see below). `accountId` null/undefined = the builtin layout.
  */
-export function budgetStatus(nowMs = Date.now(), cfg: BudgetConfig = budgetConfig(), extra: BudgetEvent[] = []): BudgetState & { logs: number; windowMin: number } {
+export function budgetStatus(
+  nowMs = Date.now(),
+  cfg: BudgetConfig = budgetConfig(),
+  extra: BudgetEvent[] = [],
+  accountId: string | null = null,
+): BudgetState & { logs: number; windowMin: number } {
   const maxWindowMin = Math.max(cfg.windowMin, cfg.maxWindowMin ?? cfg.windowMin);
   const keepFrom = nowMs - maxWindowMin * 60_000;
   for (let windowMin = cfg.windowMin; ; windowMin = Math.min(windowMin * 4, maxWindowMin)) {
     const logs = findLogs(cfg.dirs, nowMs - windowMin * 60_000);
-    const events = logs.flatMap((f) => readLogEvents(f, keepFrom));
+    const events = logs.flatMap((f) => readLogEvents(f, keepFrom).filter((e) => (e.account ?? null) === accountId));
     const st = replay([...events, ...extra], nowMs, { ...cfg, windowMin });
     if (st.settled || windowMin >= maxWindowMin) return { ...st, logs: logs.length, windowMin };
   }
@@ -277,11 +297,13 @@ export class TurnBudgetHold extends Error {
 
 // This process's turns, recorded where session.ts logs them. Counted only when
 // this process doesn't write a debug log (otherwise the log already holds them).
-const ownEvents: BudgetEvent[] = [];
+// Every entry carries whose turn it was (§7.6): one account's turns must never
+// make another wait.
+const ownEvents: Array<BudgetEvent & { account: string | null }> = [];
 // Turns let through but not yet started: the token, an image upload or the agent
 // lookup can come in between. Counted until session.ts records the turn, so a
 // request deciding meanwhile sees it.
-const grants: number[] = [];
+const grants: Array<{ t: number; account: string | null }> = [];
 const GRANT_TTL_MS = 5 * 60_000;
 let ownSeq = 0;
 // Requests waiting to decide, in arrival order. The first is deciding (and may
@@ -292,33 +314,48 @@ const line: InLine[] = [];
 function pruneOwn(nowMs: number): void {
   const keepFrom = nowMs - MAX_WINDOW_MIN * 60_000;
   while (ownEvents.length && ownEvents[0]!.t < keepFrom) ownEvents.shift();
-  while (grants.length && grants[0]! < nowMs - GRANT_TTL_MS) grants.shift();
+  while (grants.length && grants[0]!.t < nowMs - GRANT_TTL_MS) grants.shift();
 }
 
+/** The key per-account budget state is held under; null = the builtin layout. */
+const keyOf = (accountId?: string | null): string | null => accountId ?? null;
+
 /** An upstream turn starting. CopilotSession.chat calls it where it logs `Chat turn`. */
-export function recordTurn(nowMs = Date.now()): void {
-  grants.shift();
-  ownEvents.push({ t: nowMs, kind: "turn", line: `own:${ownSeq++}` });
+export function recordTurn(nowMs = Date.now(), accountId?: string | null): void {
+  const key = keyOf(accountId);
+  const i = grants.findIndex((g) => g.account === key);
+  if (i >= 0) grants.splice(i, 1);
+  else grants.shift(); // adopt the oldest grant regardless, so one is never stranded
+  ownEvents.push({ t: nowMs, kind: "turn", line: `own:${ownSeq++}`, account: key });
   pruneOwn(nowMs);
 }
 
 /** A throttled turn. session.ts calls it where it logs `Turn result: Throttled`. */
-export function recordThrottle(nowMs = Date.now()): void {
-  ownEvents.push({ t: nowMs, kind: "throttled", line: `own:${ownSeq++}` });
+export function recordThrottle(nowMs = Date.now(), accountId?: string | null): void {
+  ownEvents.push({ t: nowMs, kind: "throttled", line: `own:${ownSeq++}`, account: keyOf(accountId) });
 }
 
 /**
- * The bucket as the proxy sees it: the logs, this process's grants, and its own
- * turns unless `logged` says its debug log already holds them.
+ * The bucket as the proxy sees it, for one account: the logs, this process's
+ * grants, and its own turns unless `logged` says its debug log already holds
+ * them. `accountId` null/undefined = the builtin layout.
  */
-export function proxyBudgetStatus(nowMs = Date.now(), cfg: BudgetConfig = budgetConfig(), logged = fileLoggingEnabled()): ReturnType<typeof budgetStatus> {
+export function proxyBudgetStatus(
+  nowMs = Date.now(),
+  cfg: BudgetConfig = budgetConfig(),
+  logged = fileLoggingEnabled(),
+  accountId?: string | null,
+): ReturnType<typeof budgetStatus> {
   pruneOwn(nowMs);
+  const key = keyOf(accountId);
   const extra: BudgetEvent[] = [
-    ...(logged ? [] : ownEvents),
-    ...grants.map((t, i) => ({ t, kind: "turn" as const, line: `grant:${t}:${i}` })),
+    ...(logged ? [] : ownEvents.filter((e) => e.account === key)),
+    ...grants
+      .filter((g) => g.account === key)
+      .map((g) => ({ t: g.t, kind: "turn" as const, line: `grant:${g.t}:${key ?? "builtin"}`, account: key })),
   ];
   const dirs = logged && !cfg.dirs.includes(LOG_PATH) ? [...cfg.dirs, LOG_PATH] : cfg.dirs;
-  return budgetStatus(nowMs, { ...cfg, dirs }, extra);
+  return budgetStatus(nowMs, { ...cfg, dirs }, extra, key);
 }
 
 /** Only for tests: forget this process's turns and grants. */
@@ -327,6 +364,16 @@ export function resetTurnBudget(): void {
   grants.length = 0;
   logCache.clear();
   line.length = 0;
+}
+
+/** Drop one account's in-process budget state (it was removed). */
+export function forgetAccountBudget(accountId: string): void {
+  const keep = ownEvents.filter((e) => e.account !== accountId);
+  ownEvents.length = 0;
+  ownEvents.push(...keep);
+  const keptGrants = grants.filter((g) => g.account !== accountId);
+  grants.length = 0;
+  grants.push(...keptGrants);
 }
 
 const abortableSleep = (ms: number, signal?: AbortSignal) => new Promise<void>((res, rej) => {
@@ -346,6 +393,10 @@ export interface AwaitTurnBudgetOptions {
   cfg?: BudgetConfig;
   /** Whether this process's turns reach its debug log (default: M365_DEBUG / M365_TRACE). */
   logged?: boolean;
+  /** Which account this turn is for; null/absent = the builtin layout. Its
+   *  bucket, its throttle hold, its place in line — another account's turns
+   *  never make this one wait (§7.6). */
+  accountId?: string | null;
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -374,7 +425,7 @@ export async function awaitTurnBudget(opts: AwaitTurnBudgetOptions = {}): Promis
     if (line[0] !== me && !(await untilFront(front, maxWaitMs, opts.signal))) {
       const at = now();
       const ahead = line.indexOf(me);
-      const st = proxyBudgetStatus(at, cfg, opts.logged);
+      const st = proxyBudgetStatus(at, cfg, opts.logged, opts.accountId);
       // What the requests ahead and this one need; at least the front's next re-read.
       const d = decide(st, 1 + ahead, at, cfg);
       log.info(`Turn budget: ${fmtWait(at - t0)} in line behind ${ahead} other request(s), bucket ~${st.level.toFixed(0)}/${cfg.capacity} — more than this request may wait (${fmtWait(maxWaitMs)}), answering 429`);
@@ -411,10 +462,10 @@ async function waitForTurn(cfg: BudgetConfig, opts: AwaitTurnBudgetOptions, t0: 
   for (;;) {
     opts.signal?.throwIfAborted();
     const at = now();
-    const st = proxyBudgetStatus(at, cfg, opts.logged);
+    const st = proxyBudgetStatus(at, cfg, opts.logged, opts.accountId);
     const d = decide(st, 1, at, cfg);
     if (d.ok) {
-      grants.push(at);
+      grants.push({ t: at, account: keyOf(opts.accountId) });
       if (announced || at - t0 >= 1000) log.info(`Turn budget: sending after a ${fmtWait(at - t0)} wait (bucket ~${st.level.toFixed(0)}/${cfg.capacity})`);
       return { waitedMs: at - t0 };
     }

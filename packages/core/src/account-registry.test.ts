@@ -1,23 +1,33 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ACCOUNT_CDP_PORT,
   ACCOUNT_ID_RE,
+  AccountError,
+  accountIds,
   accountRegistrySource,
   accountsDir,
+  accountViews,
+  activateAccount,
+  addAccount,
   allocateAccount,
+  chathubOid,
   clearMockRegistry,
   configDir,
   createMockRegistry,
   migrateRegistry,
   readRegistry,
   registryProblem,
+  registryStatus,
+  removeAccount,
+  renameAccount,
   useMockRegistry,
   writeRegistry,
   type AccountRegistry,
 } from "./account-registry.js";
+import { PersonalStore } from "./personal-session.js";
 
 // `allocateAccount` and the mock write into `<config>/accounts/<id>/`, and the
 // id lives under the real config dir whenever the registry path alone is
@@ -200,5 +210,126 @@ describe("registryProblem", () => {
     expect(registryProblem(registry([entry("a"), { ...entry("b"), id: "a" }]))!.code).toBe("duplicate_id");
     expect(registryProblem(registry([entry("a")], "gone"))!.code).toBe("unknown_active");
     expect(registryProblem(registry([] as AccountRegistry["accounts"]))!.code).toBe("no_accounts");
+  });
+});
+
+describe("registryStatus", () => {
+  it("names the builtin fallback when there is no registry", () => {
+    clearMockRegistry();
+    process.env.M365_ACCOUNTS_FILE = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    const s = registryStatus();
+    expect(s).toMatchObject({ repository: "builtin", activeId: null, count: 0 });
+    expect(s.problem!.code).toBe("absent");
+    expect(s.problem!.hint).toContain("registry is created on first use");
+  });
+
+  it("names the registry path and the active account when there is one", () => {
+    useMockRegistry([{ id: "default" }, { id: "work" }]);
+    activateAccount("work");
+    const s = registryStatus();
+    expect(s).toMatchObject({ repository: "registry", activeId: "work", count: 2 });
+    expect(s.path).toBe(process.env.M365_ACCOUNTS_FILE);
+    expect(s.problem).toBeUndefined();
+  });
+
+  it("never throws on a broken registry, and says so", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    process.env.M365_ACCOUNTS_FILE = file;
+    writeFileSync(file, "{ not json");
+    expect(registryStatus()).toMatchObject({ repository: "builtin", problem: { code: "invalid_json" } });
+  });
+
+  it("never throws when the registry path cannot be read", () => {
+    process.env.M365_ACCOUNTS_FILE = tmpdir(); // a directory, not a file
+    expect(() => registryStatus()).not.toThrow();
+    expect(registryStatus().problem!.code).toBe("unreadable");
+  });
+});
+
+describe("account CRUD", () => {
+  // Each test starts from its own account home: `addAccount`/`removeAccount`
+  // write real directories, and a leftover `accounts/<id>/session.json` from the
+  // previous test would (rightly) refuse the next `addAccount`.
+  beforeEach(() => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+  });
+
+  it("adds an account, creating only its directory pair", () => {
+    useMockRegistry([{ id: "default" }]);
+    const r = addAccount("work", "Work (free)");
+    expect(r.entry.sessionFile).toBe(join(accountsDir(), "work", "session.json"));
+    expect(r.chromeCommand).toContain(`--user-data-dir="${r.entry.profileDir}"`);
+    expect(r.chromeCommand).toContain(`--remote-debugging-port=${r.entry.cdpPort}`);
+    expect(r.loginCommand).toBe("pnpm m365-personal login --account work");
+    expect(existsSync(join(accountsDir(), "work", "profile"))).toBe(true);
+    expect(accountIds()).toEqual(["default", "work"]);
+  });
+
+  it("refuses a bad id before touching the filesystem, and a taken id with 409 material", () => {
+    useMockRegistry([{ id: "default" }]);
+    expect(() => addAccount("Work!", "x")).toThrow(AccountError);
+    try { addAccount("Work!", "x"); } catch (e) { expect((e as AccountError).code).toBe("invalid_id"); }
+    try { addAccount("default", "x"); } catch (e) { expect((e as AccountError).code).toBe("already_exists"); }
+    expect(existsSync(join(accountsDir(), "Work!"))).toBe(false);
+  });
+
+  it("warns rather than blocks when the new account shares an oid", () => {
+    useMockRegistry([{ id: "default", hasSession: true }]);
+    const defaultRecord = { accessToken: "t", chathubPath: "ABC123@tenant-x" };
+    new PersonalStore(join(accountsDir(), "default", "session.json")).write({ ...defaultRecord, scenario: "S", variants: "v",
+      licenseType: "Free", agentHost: "h", product: null, source: "officeweb", optionsSets: [],
+      allowedMessageTypes: ["Chat"], expiresAt: 1, capturedAt: 0, emailHint: null, probe: null,
+      mintCount: 0, lastMintAt: 0 });
+    expect(chathubOid("ABC123@tenant-x")).toBe("abc123");
+    expect(chathubOid("no-at-sign")).toBeNull();
+    const same = addAccount("work", "Work");
+    expect(same.warning).toBeNull(); // the new account has no record yet
+    new PersonalStore(same.entry.sessionFile).write({ ...defaultRecord, scenario: "S", variants: "v",
+      licenseType: "Free", agentHost: "h", product: null, source: "officeweb", optionsSets: [],
+      allowedMessageTypes: ["Chat"], expiresAt: 1, capturedAt: 0, emailHint: null, probe: null,
+      mintCount: 0, lastMintAt: 0 });
+    expect(accountViews()[1]!.oidCollisionWith).toEqual(["default"]);
+    const warning = accountViews().find((a) => a.id === "work")!.warning;
+    expect(warning).toContain("share one daily turn budget");
+  });
+
+  it("renames a label without touching the id or the paths", () => {
+    useMockRegistry([{ id: "work" }]);
+    const before = accountViews()[0]!;
+    renameAccount("work", "Work account");
+    expect(accountViews()[0]).toMatchObject({ id: "work", label: "Work account", sessionFile: before.sessionFile });
+  });
+
+  it("activates, and refuses an unknown id", () => {
+    useMockRegistry([{ id: "default" }, { id: "work" }]);
+    expect(activateAccount("work").activeId).toBe("work");
+    expect(registryStatus().activeId).toBe("work");
+    expect(() => activateAccount("gone")).toThrow(AccountError);
+  });
+
+  it("removes by moving the directory aside, never deleting it", () => {
+    useMockRegistry([{ id: "default" }, { id: "work", hasSession: true }]);
+    const { trashed } = removeAccount("work");
+    expect(trashed).toContain(join(".trash", "work-"));
+    expect(existsSync(trashed)).toBe(true);
+    expect(existsSync(join(accountsDir(), "work"))).toBe(false);
+    expect(accountIds()).toEqual(["default"]);
+  });
+
+  it("refuses to remove the active account or the last one", () => {
+    useMockRegistry([{ id: "default" }, { id: "work" }], "work");
+    try { removeAccount("work"); } catch (e) { expect((e as AccountError).code).toBe("active"); }
+    // A fresh home, so the previous test's `work` cannot make `only` non-last.
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "only" }]);
+    try { removeAccount("only"); } catch (e) { expect((e as AccountError).code).toBe("last_account"); }
+  });
+
+  it("writes refuse a broken registry instead of overwriting it", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    process.env.M365_ACCOUNTS_FILE = file;
+    writeFileSync(file, "{ not json");
+    try { addAccount("work", "Work"); } catch (e) { expect((e as AccountError).code).toBe("registry_invalid"); }
+    expect(readFileSync(file, "utf8")).toBe("{ not json");
   });
 });

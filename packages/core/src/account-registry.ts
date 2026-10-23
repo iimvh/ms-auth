@@ -1,7 +1,7 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { stripBom } from "./personal-session.js";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { PersonalStore, stripBom } from "./personal-session.js";
 import { createLogger } from "./log.js";
 
 const log = createLogger("accounts");
@@ -109,10 +109,9 @@ function nextFreePort(accounts: AccountEntry[]): number {
 const MAX_CDP_PORT = 65_535;
 
 /** Build the entry for a new account under `accounts/<id>/`. Throws when the id
- *  is already in the registry, or when the account's own session file — its
- *  identity on disk — already exists. A bare leftover directory is not
- *  identity: the caller creates the pair (Task 3's `addAccount`), and a failed
- *  attempt must not block the retry. */
+ *  is already in the registry or the account's session file already exists.
+ *  A bare directory is NOT identity: `addAccount` creates the pair, and a
+ *  failed or half-finished attempt must not block the retry that fixes it. */
 export function allocateAccount(
   reg: AccountRegistry,
   id: AccountId,
@@ -122,7 +121,7 @@ export function allocateAccount(
   if (!ACCOUNT_ID_RE.test(id)) {
     throw new Error(`invalid account id "${id}": ids match ${ACCOUNT_ID_RE.source}`);
   }
-  const taken = reg.accounts.some((a) => a.id === id) || existsSync(join(accountsDir(), id));
+  const taken = reg.accounts.some((a) => a.id === id) || existsSync(join(accountsDir(), id, "session.json"));
   if (taken) throw new Error(`account "${id}" already exists`);
   return {
     id,
@@ -402,4 +401,332 @@ export function registryProblem(registry: AccountRegistry): AccountProblem | nul
     };
   }
   return null;
+}
+
+export type RegistryProblemCode = "absent" | "invalid_json" | "wrong_shape" | "unreadable" | string;
+
+/** Where the accounts come from right now, and what is wrong if anything is.
+ *  This is what `/healthz` and `/accounts` report (§7.9), and it never throws:
+ *  the proxy has to keep answering with a broken registry. */
+export interface RegistryStatus {
+  /** The registry file's absolute path, as resolved for this process (§7.9). */
+  path: string;
+  /** `registry` = accounts.json; `builtin` = no usable registry (M365_PERSONAL_* / today's defaults). */
+  repository: "registry" | "builtin";
+  activeId: string | null;
+  count: number;
+  /** Why the registry could not be used, and what to do about it. */
+  problem?: { code: RegistryProblemCode; detail: string; hint: string };
+}
+
+/** Report the registry without ever throwing. A read failure (a directory where
+ *  the file should be, a lock, permissions) becomes `unreadable`; anything else
+ *  `readRegistry` would report is passed through. */
+export function registryStatus(src?: AccountRegistrySource): RegistryStatus {
+  const source = src ?? accountRegistrySource();
+  let read = readRegistry(source);
+  if (!read.ok && read.registry === null && read.problem !== "absent") {
+    try {
+      source.read();
+    } catch (err) {
+      read = { ok: false, problem: "unreadable", registry: null };
+      return builtinStatus(source.file, {
+        code: "unreadable",
+        detail: String(err),
+        hint: invalidHint(source.file),
+      });
+    }
+  }
+  if (!read.ok) {
+    return builtinStatus(source.file, {
+      code: read.problem,
+      detail:
+        read.problem === "absent"
+          ? `no account registry at ${source.file}`
+          : `${source.file} is not a usable registry (${read.problem})`,
+      hint:
+        read.problem === "absent"
+          ? "no account registry yet — the registry is created on first use of personal mode"
+          : invalidHint(source.file),
+    });
+  }
+  const problem = registryProblem(read.registry);
+  if (problem) {
+    return builtinStatus(source.file, {
+      code: problem.code,
+      detail: problem.detail,
+      hint: invalidHint(source.file),
+    });
+  }
+  return {
+    path: source.file,
+    repository: "registry",
+    activeId: read.registry.activeId,
+    count: read.registry.accounts.length,
+  };
+}
+
+function invalidHint(path: string): string {
+  return `fix or delete ${path}; the proxy is using the builtin layout until it is fixed`;
+}
+
+function builtinStatus(path: string, problem: NonNullable<RegistryStatus["problem"]>): RegistryStatus {
+  log.debug(`registry unusable (${problem.code}): ${problem.detail}`);
+  return { path, repository: "builtin", activeId: null, count: 0, problem };
+}
+
+/** Every account id, in registry order; `[]` when there is no usable registry. */
+export function accountIds(src?: AccountRegistrySource): string[] {
+  return readRegistry(src).registry?.accounts.map((a) => a.id) ?? [];
+}
+
+/** The Microsoft identity a record names: `chathubPath` is `oid@tid`, so the
+ *  segment before the `@` is the account's `oid` — the key quota and throttling
+ *  actually use. `null` when the path carries none. */
+export function chathubOid(chathubPath: string): string | null {
+  const at = chathubPath.indexOf("@");
+  if (at <= 0) return null;
+  const oid = chathubPath.slice(0, at).toLowerCase();
+  return oid.length > 0 ? oid : null;
+}
+
+/** One account as the list route and the UI need it. */
+export interface AccountView {
+  id: AccountId;
+  label: string;
+  active: boolean;
+  cdpPort: number;
+  sessionFile: string;
+  profileDir: string;
+  profileExists: boolean;
+  /** The Microsoft identity, when a usable record is stored. */
+  oid: string | null;
+  /** Ids of other accounts whose stored record names the same `oid`. */
+  oidCollisionWith: AccountId[];
+  /** Set when the two share one daily turn budget; `null` otherwise. */
+  warning: string | null;
+}
+
+function profileExistsAt(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function oidOf(entry: AccountEntry): string | null {
+  const state = new PersonalStore(entry.sessionFile).inspect();
+  return state.ok ? chathubOid(state.record.chathubPath) : null;
+}
+
+/** The list projection: every entry plus its profile presence and identity.
+ *  Never throws — an unreadable record is simply "no oid". */
+export function accountViews(src?: AccountRegistrySource): AccountView[] {
+  const reg = readRegistry(src).registry;
+  if (!reg) return [];
+  const oids = reg.accounts.map(oidOf);
+  return reg.accounts.map((entry, i) => {
+    const oid = oids[i] ?? null;
+    const oidCollisionWith =
+      oid === null ? [] : reg.accounts.filter((other, j) => j !== i && oids[j] === oid).map((other) => other.id);
+    return {
+      id: entry.id,
+      label: entry.label,
+      active: entry.id === reg.activeId,
+      cdpPort: entry.cdpPort,
+      sessionFile: entry.sessionFile,
+      profileDir: entry.profileDir,
+      profileExists: profileExistsAt(entry.profileDir),
+      oid,
+      oidCollisionWith,
+      warning:
+        oidCollisionWith.length > 0
+          ? `shares Microsoft account ${oid} with ${oidCollisionWith.join(", ")} — they share one daily turn budget`
+          : null,
+    };
+  });
+}
+
+/** Why an account operation was refused. The route layer maps these to status
+ *  codes (Task 11); each carries what to do about it. */
+export class AccountError extends Error {
+  constructor(
+    readonly code: "invalid_id" | "not_found" | "already_exists" | "active" | "last_account" | "registry_invalid",
+    message: string,
+    readonly hint: string,
+  ) {
+    super(message);
+    this.name = "AccountError";
+  }
+}
+
+export interface NewAccount {
+  entry: AccountEntry;
+  chromeCommand: string;
+  loginCommand: string;
+  warning: string | null;
+}
+
+/** Read the registry for a write: a missing registry is created (migration),
+ *  a broken one refuses rather than being overwritten. */
+function readOrCreate(src?: AccountRegistrySource): { source: AccountRegistrySource; registry: AccountRegistry } {
+  const source = src ?? accountRegistrySource();
+  const read = readRegistry(source);
+  if (read.ok) return { source, registry: read.registry };
+  if (read.problem === "absent") {
+    // Creating the registry is this write's own job; `migrateRegistry` would
+    // only refuse to touch what is already there (and has none — the read above
+    // just said so).
+    const entry: AccountEntry = {
+      id: "default",
+      label: "Personal (free)",
+      cdpPort: ACCOUNT_CDP_PORT,
+      sessionFile: join(configDir(), ACCOUNT_SESSION_FILE),
+      profileDir: join(configDir(), ACCOUNT_PROFILE_DIR),
+      createdAt: new Date().toISOString(),
+    };
+    return { source, registry: { version: 1, activeId: "default", accounts: [entry] } };
+  }
+  throw new AccountError(
+    "registry_invalid",
+    `the account registry at ${source.file} cannot be used (${read.problem})`,
+    invalidHint(source.file),
+  );
+}
+
+function findEntry(registry: AccountRegistry, id: AccountId): AccountEntry {
+  const entry = registry.accounts.find((a) => a.id === id);
+  if (!entry) {
+    throw new AccountError(
+      "not_found",
+      `account "${id}" does not exist`,
+      `known accounts: ${registry.accounts.map((a) => a.id).join(", ") || "none"}`,
+    );
+  }
+  return entry;
+}
+
+/** The exact command that opens an account's own Chrome: its profile and its
+ *  debugging port (mirrors `chromeCommandLine()` in `personal-auth.ts`). */
+export function chromeCommandFor(account: Pick<AccountEntry, "profileDir" | "cdpPort">): string {
+  return `chrome --remote-debugging-port=${account.cdpPort} --user-data-dir="${account.profileDir}" https://m365.cloud.microsoft/chat`;
+}
+
+export function loginCommandFor(id: AccountId): string {
+  return `pnpm m365-personal login --account ${id}`;
+}
+
+/** Add an account: validate, allocate, create its directory pair, record it.
+ *  A duplicate Microsoft account is a warning, never a block (§7.4): the two
+ *  would share one turn budget, and the operator is the one who knows why. */
+export function addAccount(
+  id: AccountId,
+  label: string,
+  src?: AccountRegistrySource,
+  now: Date = new Date(),
+): NewAccount {
+  if (!isSafeAccountId(id)) {
+    throw new AccountError(
+      "invalid_id",
+      `invalid account id "${id}"`,
+      "ids match [a-z0-9][a-z0-9-]{0,31}: lowercase letters, digits and dashes, starting with a letter or digit",
+    );
+  }
+  const { source, registry } = readOrCreate(src);
+  if (registry.accounts.some((a) => a.id === id)) {
+    throw new AccountError("already_exists", `account "${id}" already exists`, "pick another id, or rename the existing one");
+  }
+  let entry: AccountEntry;
+  try {
+    entry = allocateAccount(registry, id, label, now);
+  } catch (err) {
+    throw new AccountError("already_exists", (err as Error).message, "pick another id, or remove the leftover directory");
+  }
+  mkdirSync(accountsDir(), { recursive: true, mode: 0o700 });
+  mkdirSync(entry.profileDir, { recursive: true, mode: 0o700 });
+  writeRegistry({ ...registry, accounts: [...registry.accounts, entry] }, source);
+  // A brand-new account has no record, so an oid can only collide once it has
+  // logged in; `accountViews()` carries the warning from then on.
+  const oid = oidOf(entry);
+  const collision = oid === null ? [] : registry.accounts.filter((a) => oidOf(a) === oid).map((a) => a.id);
+  return {
+    entry,
+    chromeCommand: chromeCommandFor(entry),
+    loginCommand: loginCommandFor(id),
+    warning:
+      collision.length > 0
+        ? `shares Microsoft account ${oid} with ${collision.join(", ")} — they share one daily turn budget`
+        : null,
+  };
+}
+
+/** Change what the UI shows. The id and both paths are immutable. */
+export function renameAccount(id: AccountId, label: string, src?: AccountRegistrySource): AccountEntry {
+  const { source, registry } = readOrCreate(src);
+  const entry = findEntry(registry, id);
+  const renamed = { ...entry, label };
+  writeRegistry(
+    { ...registry, accounts: registry.accounts.map((a) => (a.id === id ? renamed : a)) },
+    source,
+  );
+  return renamed;
+}
+
+/** Point new requests and new conversations at this account. A running session
+ *  keeps the account it started on (§7.3). */
+export function activateAccount(id: AccountId, src?: AccountRegistrySource): AccountRegistry {
+  const { source, registry } = readOrCreate(src);
+  findEntry(registry, id);
+  const next: AccountRegistry = { ...registry, activeId: id };
+  writeRegistry(next, source);
+  return next;
+}
+
+/** Remove an account by moving its files aside — never deleting them. Refuses
+ *  the active account (switch first), the last account (nothing would serve),
+ *  and anything the caller found busy (the route checks the pool). */
+export function removeAccount(
+  id: AccountId,
+  src?: AccountRegistrySource,
+  now: Date = new Date(),
+): { trashed: string } {
+  const { source, registry } = readOrCreate(src);
+  const entry = findEntry(registry, id);
+  // Last first: with one account left, "it is the active one" is true but
+  // useless — the operator needs to know nothing would serve afterwards.
+  if (registry.accounts.length <= 1) {
+    throw new AccountError(
+      "last_account",
+      `account "${id}" is the last one`,
+      "an account is the last one; add another first",
+    );
+  }
+  if (registry.activeId === id) {
+    throw new AccountError(
+      "active",
+      `account "${id}" is the active account`,
+      "activate another account first",
+    );
+  }
+  const trashDir = join(accountsDir(), ".trash", `${id}-${now.getTime()}`);
+  mkdirSync(dirname(trashDir), { recursive: true, mode: 0o700 });
+  const owned = join(accountsDir(), id);
+  if (isInside(entry.sessionFile, accountsDir()) && isInside(entry.profileDir, accountsDir())) {
+    renameSync(owned, trashDir);
+  } else {
+    // Today's layout: the files are not under the account's own directory, so
+    // move each half that exists into one trash directory.
+    mkdirSync(trashDir, { recursive: true, mode: 0o700 });
+    if (existsSync(entry.sessionFile)) renameSync(entry.sessionFile, join(trashDir, "session.json"));
+    if (existsSync(entry.profileDir)) renameSync(entry.profileDir, join(trashDir, "profile"));
+  }
+  writeRegistry({ ...registry, accounts: registry.accounts.filter((a) => a.id !== id) }, source);
+  return { trashed: trashDir };
+}
+
+/** Whether `p` is `dir` or lives under it. */
+function isInside(p: string, dir: string): boolean {
+  const rel = relative(dir, p);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }

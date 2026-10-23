@@ -2,25 +2,32 @@ import { statSync, rmSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { capturePersonalSession } from "./personal-capture.js";
 import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
-import { PersonalStore, personalProfileDir, personalSessionFile } from "./personal-session.js";
+import { PersonalStore } from "./personal-session.js";
+import { AccountError, resolveAccount } from "./account-registry.js";
 import { probePersonalCapture } from "./session.js";
 import { createLogger } from "./log.js";
 
 const log = createLogger("personal-cli");
 
-const LOGIN_COMMAND = "pnpm m365-personal login";
-
 const USAGE = `m365-personal — manage the personal-account M365 session
 
-usage: m365-personal <command> [--json]
+usage: m365-personal <command> [--account <id>] [--json]
 
   login    capture the web app's session in a visible browser and store it
   status   print the stored session's expiry, scenario and path
   logout   delete the stored session and the browser profile
+
+  --account <id>  act on that account instead of the active one (the ids are
+                  the proxy's /accounts ones; the default account keeps the
+                  pre-registry layout)
 `;
 
 export interface CliDeps {
   store: PersonalStore;
+  /** The account acted on; null = the builtin layout (one account, no registry). */
+  accountId: string | null;
+  /** Where that account's Chrome profile lives (logout deletes it). */
+  profileDir: string;
   capture: (headed: boolean) => Promise<PersonalCapture>;
   probe: (capture: PersonalCapture) => Promise<PersonalRecord["probe"]>;
   out: (line: string) => void;
@@ -35,11 +42,14 @@ function probeModels(): string[] {
     .filter(Boolean);
 }
 
-function defaultDeps(): CliDeps {
+function defaultDeps(accountId: string | null): CliDeps {
+  const resolved = resolveAccount({ id: accountId });
   return {
-    store: new PersonalStore(personalSessionFile()),
+    accountId: resolved.id,
+    profileDir: resolved.profileDir,
+    store: new PersonalStore(resolved.sessionFile),
     capture: (headed) =>
-      capturePersonalSession({ headed, profileDir: personalProfileDir(), onEvent: (line) => console.log(line) }),
+      capturePersonalSession({ headed, profileDir: resolved.profileDir, onEvent: (line) => console.log(line) }),
     probe: (capture) =>
       process.env.M365_PERSONAL_PROBE === "0"
         ? Promise.resolve(null)
@@ -66,31 +76,77 @@ function expiryLines(record: PersonalRecord, now: number): string[] {
   ];
 }
 
-function profileExists(): boolean {
+function profileExists(profileDir: string): boolean {
   try {
-    return statSync(personalProfileDir()).isDirectory();
+    return statSync(profileDir).isDirectory();
   } catch {
     return false;
   }
 }
 
-function usageError(why: string): number {
+function usageError(why: string, out?: (line: string) => void): number {
   console.error(why);
   console.error(USAGE);
+  // Also through `out`, so a caller that shows the CLI's own output (a wrapper,
+  // a test) sees the reason rather than an exit code alone.
+  out?.(why);
   return 2;
+}
+
+/**
+ * Pull `--account <id>` out of the flags. Anything else is unknown. A missing
+ * value, an unusable id, or an id the registry does not hold is a usage error
+ * (exit 2) raised BEFORE any capture or write — naming the account must never
+ * be able to fall back to the active one.
+ */
+function parseFlags(flags: string[], known: string[]): { ok: true; accountId: string | null } | { ok: false; why: string } {
+  let accountId: string | null = null;
+  for (let i = 0; i < flags.length; i++) {
+    const f = flags[i]!;
+    if (f === "--account") {
+      const v = flags[i + 1];
+      if (!v || v.startsWith("--")) return { ok: false, why: "--account needs an account id" };
+      accountId = v;
+      i++;
+      continue;
+    }
+    if (f.startsWith("--account=")) {
+      accountId = f.slice("--account=".length);
+      if (!accountId) return { ok: false, why: "--account needs an account id" };
+      continue;
+    }
+    if (!known.includes(f)) return { ok: false, why: `unknown flag ${f}` };
+  }
+  if (accountId !== null) {
+    try {
+      resolveAccount({ id: accountId });
+    } catch (err) {
+      return { ok: false, why: err instanceof AccountError ? err.message : String(err) };
+    }
+  }
+  return { ok: true, accountId };
 }
 
 /** Run the `m365-personal` subcommand. Returns the process exit code. */
 export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): Promise<number> {
-  const d: CliDeps = { ...defaultDeps(), ...deps };
   const [command, ...flags] = argv;
   const json = flags.includes("--json");
-  const unknownFlags = flags.filter((f) => f !== "--json");
+  // --account is resolved BEFORE anything is captured or written: naming an
+  // account must never silently fall back to the active one (§7.9).
+  const parsed = parseFlags(flags.filter((f) => f !== "--json"), []);
+  if (!parsed.ok) return usageError(parsed.why, deps?.out);
+  let d: CliDeps;
+  try {
+    d = { ...defaultDeps(parsed.accountId), ...deps };
+  } catch (err) {
+    return usageError(err instanceof AccountError ? err.message : String(err), deps?.out);
+  }
+  const who = d.accountId ? `account "${d.accountId}"` : "the personal account";
+  const loginCommand = `pnpm m365-personal login${d.accountId ? ` --account ${d.accountId}` : ""}`;
 
   switch (command) {
     case "login": {
-      if (unknownFlags.length > 0) return usageError(`unknown flag ${unknownFlags[0]}`);
-      d.out("capturing the personal session in a visible browser…");
+      d.out(`capturing the personal session for ${who} in a visible browser...`);
       try {
         const capture = await d.capture(true);
         const probe = await d.probe(capture);
@@ -102,7 +158,8 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
           lastMintAt: d.now(),
         };
         d.store.write(record);
-        log.debug(`login captured scenario=${record.scenario} mintCount=${record.mintCount}`);
+        log.debug(`login captured account=${d.accountId ?? "builtin"} scenario=${record.scenario} mintCount=${record.mintCount}`);
+        d.out(`account: ${d.accountId ?? "(builtin layout — the only account)"}`);
         for (const line of expiryLines(record, d.now())) d.out(line);
         if (probe && probe.ok) {
           d.out(`probed model: ${probe.model}`);
@@ -121,42 +178,50 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
         return 0;
       } catch (err) {
         console.error(`login failed: ${err instanceof Error ? err.message : String(err)}`);
-        console.error(`run: ${LOGIN_COMMAND}`);
+        console.error(`run: ${loginCommand}`);
         return 1;
       }
     }
 
     case "status": {
-      if (unknownFlags.length > 0) return usageError(`unknown flag ${unknownFlags[0]}`);
-      const record = d.store.read();
-      if (!record) {
-        d.out("no personal session stored.");
-        d.out(`run: ${LOGIN_COMMAND}`);
+      const state = d.store.inspect();
+      if (!state.ok) {
+        // "Nothing stored" and "what is stored is broken" need different repairs;
+        // reporting both as the former sent the operator to `login` blind.
+        if (state.problem === "absent") {
+          d.out(`no personal session stored for ${who}.`);
+          d.out(`run: ${loginCommand}`);
+          return 1;
+        }
+        d.out(`the personal session record for ${who} is unusable (${state.problem}): ${state.detail}`);
+        d.out(`delete it (or run: pnpm m365-personal logout${d.accountId ? ` --account ${d.accountId}` : ""}) and run: ${loginCommand}`);
+        if (json) d.out(JSON.stringify({ account: d.accountId, problem: state.problem, detail: state.detail, profileExists: profileExists(d.profileDir) }));
         return 1;
       }
+      const record = state.record;
       if (json) {
-        d.out(JSON.stringify({ ...publicRecord(record), profileExists: profileExists() }));
+        d.out(JSON.stringify({ ...publicRecord(record), account: d.accountId, profileExists: profileExists(d.profileDir) }));
         return 0;
       }
+      d.out(`account: ${d.accountId ?? "(builtin layout — the only account)"}`);
       for (const line of expiryLines(record, d.now())) d.out(line);
       d.out(`account hint: ${record.emailHint ?? "(none recorded)"}`);
-      d.out(`browser profile present: ${profileExists() ? "yes" : "no"}`);
+      d.out(`browser profile present: ${profileExists(d.profileDir) ? "yes" : "no"}`);
       return 0;
     }
-
     case "logout": {
       d.store.delete();
       try {
-        rmSync(personalProfileDir(), { recursive: true, force: true });
+        rmSync(d.profileDir, { recursive: true, force: true });
       } catch (err) {
         log.debug("deleting the personal browser profile failed:", err);
       }
-      d.out("deleted the stored session and the browser profile.");
+      d.out(`deleted the stored session and the browser profile for ${who}.`);
       return 0;
     }
 
     default:
-      return usageError(command ? `unknown command ${command}` : "usage");
+      return usageError(command ? `unknown command ${command}` : "usage", deps?.out);
   }
 }
 

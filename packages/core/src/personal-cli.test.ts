@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runPersonalCli } from "./personal-cli.js";
 import { PersonalStore } from "./personal-session.js";
+import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
 
 const capture = {
   accessToken: "secret-token", chathubPath: "oid@tid", scenario: "OfficeWebPaidConsumerCopilot",
@@ -63,5 +64,62 @@ describe("m365-personal cli", () => {
     expect(await runPersonalCli(["logout"], { store: d.store, out: d.outFn })).toBe(0);
     expect(d.store.read()).toBeNull();
     expect(await runPersonalCli(["wat"], { store: d.store, out: d.outFn })).toBe(2);
+  });
+});
+
+describe("--account", () => {
+  const withRegistry = () => {
+    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
+    useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
+  };
+
+  it("writes the chosen account's record, not the active one's", async () => {
+    withRegistry();
+    const workStore = new PersonalStore(join(accountsDir(), "work", "session.json"));
+    const defaultStore = new PersonalStore(join(accountsDir(), "default", "session.json"));
+    const before = defaultStore.read();
+    const out: string[] = [];
+    const code = await runPersonalCli(["login", "--account", "work"], {
+      capture: vi.fn(async () => capture),
+      probe: vi.fn(async () => ({ model: "claude-sonnet", ok: true, at: 1 })),
+      out: (l) => out.push(l), now: () => 1,
+    });
+    expect(code).toBe(0);
+    expect(workStore.read()?.scenario).toBe("OfficeWebPaidConsumerCopilot");
+    expect(defaultStore.read()).toEqual(before); // the active (default) account untouched
+    expect(out.join("\n")).toContain('account: work');
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
+  });
+
+  it("status reads the chosen account", async () => {
+    withRegistry();
+    activateAccount("work");
+    const out: string[] = [];
+    await runPersonalCli(["status", "--account", "work", "--json"], { out: (l) => out.push(l), now: () => 1 });
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed.scenario).toBeTruthy();
+    expect(parsed.account).toBe("work");
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
+  });
+
+  it("an unknown account is a usage error, before anything is read or written", async () => {
+    withRegistry();
+    const captureFn = vi.fn(async () => capture);
+    const out: string[] = [];
+    expect(await runPersonalCli(["login", "--account", "nope"], { capture: captureFn, out: (l) => out.push(l) })).toBe(2);
+    expect(captureFn).not.toHaveBeenCalled();
+    expect(out.join("\n")).toContain("nope");
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
+  });
+
+  it("--account without a value is a usage error", async () => {
+    withRegistry();
+    const out: string[] = [];
+    expect(await runPersonalCli(["status", "--account"], { out: (l) => out.push(l) })).toBe(2);
+    clearMockRegistry();
+    delete process.env.M365_ACCOUNT_HOME;
   });
 });

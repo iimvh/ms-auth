@@ -9,7 +9,7 @@
 //
 // Full protocol write-up: docs/hypotheses.md §14.
 
-import { getToken, getImageArtifactToken } from "./auth.js";
+import { getToken, getImageArtifactToken } from "./adapters/msal/auth.js";
 import { CopilotSession } from "./session.js";
 import { createLogger, trunc } from "./log.js";
 import { awaitTurnBudget } from "./turn-budget.js";

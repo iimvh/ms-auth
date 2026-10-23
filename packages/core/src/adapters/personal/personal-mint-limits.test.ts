@@ -2,7 +2,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { INTERACTIVE_APPROVAL_ENV, NO_INTERACTIVE_ENV, interactiveLoginPermitted } from "./auth.js";
 import {
   PERSONAL_AUTH_ERROR_CODES,
   PersonalAuthError,
@@ -132,14 +131,5 @@ describe("the personal auth error codes", () => {
   it("are exactly the six a PersonalAuthError may carry", () => {
     expect([...PERSONAL_AUTH_ERROR_CODES].sort()).toEqual([...ALL].sort());
     for (const code of ALL) expect(new PersonalAuthError(code, "boom").code).toBe(code);
-  });
-});
-
-describe("interactive login", () => {
-  it("is opt-in, and vetoed by M365_NO_INTERACTIVE", () => {
-    expect(interactiveLoginPermitted({})).toBe(false);
-    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "0" })).toBe(false);
-    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "1" })).toBe(true);
-    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "1", [NO_INTERACTIVE_ENV]: "1" })).toBe(false);
   });
 });

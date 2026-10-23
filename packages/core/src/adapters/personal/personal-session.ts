@@ -1,8 +1,8 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod/v4";
-import { resolveAccount } from "./account-registry.js";
-import { createLogger } from "./log.js";
+import { resolveAccount } from "../../account-registry.js";
+import { createLogger } from "../../log.js";
 
 const log = createLogger("personal-session");
 

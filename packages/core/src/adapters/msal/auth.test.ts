@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 process.env.M365_SECRETS_FILE = join(mkdtempSync(join(tmpdir(), "sec-")), "secrets.json");
 
-const { SecretsFileSchema, loadSecrets } = await import("./auth.js");
+const { INTERACTIVE_APPROVAL_ENV, NO_INTERACTIVE_ENV, SecretsFileSchema, interactiveLoginPermitted, loadSecrets } = await import("./auth.js");
 
 const SECRETS_FILE = process.env.M365_SECRETS_FILE;
 
@@ -36,5 +36,14 @@ describe("the secrets file", () => {
 
     writeFileSync(SECRETS_FILE, "{not json");
     expect(loadSecrets()).toBeNull();
+  });
+});
+
+describe("interactive login", () => {
+  it("is opt-in, and vetoed by M365_NO_INTERACTIVE", () => {
+    expect(interactiveLoginPermitted({})).toBe(false);
+    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "0" })).toBe(false);
+    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "1" })).toBe(true);
+    expect(interactiveLoginPermitted({ [INTERACTIVE_APPROVAL_ENV]: "1", [NO_INTERACTIVE_ENV]: "1" })).toBe(false);
   });
 });

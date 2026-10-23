@@ -23,14 +23,18 @@ const SHARED_IMPORT = "import { shared } from \"../shared.js\";\n";
 
 const scratchDirs: string[] = [];
 
-function fixture(files: Record<string, string>): string {
-  const root = mkdtempSync(join(tmpdir(), "adapter-boundaries-"));
-  scratchDirs.push(root);
+function fixtureAt(root: string, files: Record<string, string>): void {
   for (const [path, contents] of Object.entries(files)) {
     const full = path.startsWith(`${ADAPTER_ROOT}/`) ? join(root, path) : join(root, CORE_SRC, path);
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, contents);
   }
+}
+
+function fixture(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "adapter-boundaries-"));
+  scratchDirs.push(root);
+  fixtureAt(root, files);
   return root;
 }
 
@@ -52,11 +56,32 @@ afterEach(() => {
 });
 
 describe("adapter boundary", () => {
-  it("passes on the current packages/core tree, where neither adapter directory exists yet", () => {
+  it("passes on the current packages/core tree, with both adapters present", () => {
     const report = checkBoundaries({ coreSrcDir: join(process.cwd(), CORE_SRC), adapterRoot: ADAPTER_ROOT });
-    expect(report.adaptersPresent).toEqual([]);
+    expect(report.adaptersPresent).toEqual(["msal", "personal"]);
     expect(report.scannedFiles).toBeGreaterThan(20);
     expect(report.violations).toEqual([]);
+  });
+
+  it("fails --check on a copy of the current graph once an adapter reaches into the other", () => {
+    const root = mkdtempSync(join(tmpdir(), "adapter-boundaries-"));
+    scratchDirs.push(root);
+    const graph = buildGraph({ adapterRoot: ADAPTER_ROOT });
+    expect(graph.edges.some((edge) => edge.from === `${ADAPTER_ROOT}/msal/auth.ts`)).toBe(true);
+    for (const node of graph.nodes.filter((node) => node.startsWith(`${CORE_SRC}/`))) {
+      const full = join(root, node);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, readFileSync(node, "utf8"));
+    }
+    fixtureAt(root, {
+      [`${ADAPTER_ROOT}/msal/token.ts`]: MSAL_IMPORTS_PERSONAL,
+      [`${ADAPTER_ROOT}/personal/personal.ts`]: `export const personal = 1;\n`,
+    });
+    const report = checkBoundaries({ coreSrcDir: join(root, CORE_SRC), adapterRoot: ADAPTER_ROOT });
+    expect(report.violations.map((v) => `${v.importer}:${v.adapter}->${v.targetAdapter}`)).toEqual([
+      `${ADAPTER_ROOT}/msal/token.ts:msal->personal`,
+    ]);
+    expect(run(["--check"], { repoRoot: root, ...silent })).toBe(1);
   });
 
   it("reports an msal import of personal and the reverse", () => {
@@ -151,7 +176,8 @@ describe("dependency graph baseline", () => {
     const baseline = JSON.parse(readFileSync("scripts/dependency-graph-baseline.json", "utf8"));
     expect(baseline.nodes).toContain(`${CORE_SRC}/index.ts`);
     expect(baseline.nodes).toContain(`${CORE_SRC}/session.ts`);
-    expect(baseline.edges.some((e: { from: string; to: string }) => e.from === `${CORE_SRC}/auth.ts` && e.to === `${CORE_SRC}/personal-auth.ts`)).toBe(true);
+    expect(baseline.nodes).toContain(`${ADAPTER_ROOT}/msal/auth.ts`);
+    expect(baseline.edges.some((e: { from: string; to: string }) => e.from === `${CORE_SRC}/model.ts` && e.to === `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
     expect(baseline.nodes.length).toBeGreaterThan(20);
   });
 });

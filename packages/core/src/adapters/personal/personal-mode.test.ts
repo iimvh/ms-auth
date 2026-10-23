@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isPersonalMode, personalDefaultModel, personalModeDefaults, resolveAuthMode, shouldSendCodeInterpreter } from "./personal-mode.js";
 import { PersonalStore } from "./personal-session.js";
-import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "./account-registry.js";
+import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "../../account-registry.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -1,6 +1,6 @@
-import { getToken } from "./auth.js";
-import { getPersonalToken } from "./personal-auth.js";
-import { isPersonalMode } from "./personal-mode.js";
+import { getToken } from "./adapters/msal/auth.js";
+import { getPersonalToken } from "./adapters/personal/personal-auth.js";
+import { isPersonalMode } from "./adapters/personal/personal-mode.js";
 import { getOrCreateAgent } from "./agent.js";
 import { CopilotSession } from "./session.js";
 import { uploadImage, type ImageAnnotation } from "./image-input.js";
@@ -9,6 +9,10 @@ import { awaitTurnBudget } from "./turn-budget.js";
 import type { CopilotStream } from "./copilot.js";
 
 const log = createLogger("model");
+
+function modeToken(): () => Promise<string> {
+  return isPersonalMode() ? getPersonalToken : getToken;
+}
 
 export interface ModelSessionOptions {
   /** Pre-resolved auth token. If not provided, getToken() is called. */
@@ -72,7 +76,7 @@ export class ModelSession {
     const pinned = options.accountId ?? null;
     this.accountId = pinned;
     this.resolveToken = options.getToken
-      ?? (pinned !== null && isPersonalMode() ? () => getPersonalToken({ accountId: pinned }) : getToken);
+      ?? (pinned !== null && isPersonalMode() ? () => getPersonalToken({ accountId: pinned }) : modeToken());
     // Personal mode forces the tool agent OFF (spec §10.4) while still
     // honouring an explicit useAgent: false.
     this.useAgent = options.useAgent !== false && !(isPersonalMode() && !options.useAgent);

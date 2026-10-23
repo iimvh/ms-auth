@@ -31,9 +31,9 @@ import {
   type AccountRegistry,
   type ResolvedAccount,
 } from "./account-registry.js";
-import { PersonalStore, personalProfileDir, personalSessionFile } from "./personal-session.js";
-import { personalCdpUrl } from "./personal-harvest-cdp.js";
-import { chromeCommandLine, probeCdpTarget } from "./personal-auth.js";
+import { PersonalStore, personalProfileDir, personalSessionFile } from "./adapters/personal/personal-session.js";
+import { personalCdpUrl } from "./adapters/personal/personal-harvest-cdp.js";
+import { chromeCommandLine, probeCdpTarget } from "./adapters/personal/personal-auth.js";
 
 const withEnv = <T>(vars: Record<string, string>, fn: () => T): T => {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));

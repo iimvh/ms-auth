@@ -3,8 +3,8 @@ import { attachChatPage } from "./personal-harvest-cdp.js";
 import { harvestPersonalToken, isHarvestError } from "./personal-harvest.js";
 import type { PersonalCapture, PersonalRecord, PersonalRecordState } from "./personal-session.js";
 import { PersonalStore } from "./personal-session.js";
-import { resolveAccount, type AccountId } from "./account-registry.js";
-import { createLogger } from "./log.js";
+import { resolveAccount, type AccountId } from "../../account-registry.js";
+import { createLogger } from "../../log.js";
 import {
   MINT_HOUR_MS,
   PERSONAL_MINT_RATE_LIMIT_ENV,

@@ -1,6 +1,6 @@
 import type { PersonalRecord } from "./personal-session.js";
 import { PersonalStore } from "./personal-session.js";
-import { resolveAccount } from "./account-registry.js";
+import { resolveAccount } from "../../account-registry.js";
 
 export type AuthMode = "msal" | "personal";
 

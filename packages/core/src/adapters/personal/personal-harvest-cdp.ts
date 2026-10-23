@@ -1,6 +1,6 @@
-import { createLogger } from "./log.js";
+import { createLogger } from "../../log.js";
 import type { Locator, Page } from "playwright";
-import { resolveAccount } from "./account-registry.js";
+import { resolveAccount } from "../../account-registry.js";
 import { HarvestError, type HarvestedPage, type HarvestedSocket } from "./personal-harvest.js";
 import { frameText } from "./personal-capture.js";
 

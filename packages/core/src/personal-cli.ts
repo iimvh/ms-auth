@@ -1,9 +1,10 @@
+import "./personal-wiring.js";
 import { statSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { capturePersonalSession } from "./personal-capture.js";
-import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
-import { PersonalStore } from "./personal-session.js";
+import { capturePersonalSession } from "./adapters/personal/personal-capture.js";
+import type { PersonalCapture, PersonalRecord } from "./adapters/personal/personal-session.js";
+import { PersonalStore } from "./adapters/personal/personal-session.js";
 import { AccountError, accountsDir, configDir, resolveAccount } from "./account-registry.js";
 import { probePersonalCapture } from "./session.js";
 import { createLogger } from "./log.js";

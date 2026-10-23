@@ -1,4 +1,4 @@
-import { createLogger } from "./log.js";
+import { createLogger } from "../../log.js";
 import { PersonalCaptureError } from "./personal-capture.js";
 import type { PersonalCapture } from "./personal-session.js";
 

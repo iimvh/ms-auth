@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { createLogger } from "./log.js";
-import { getTokenForScope } from "./auth.js";
+import { getTokenForScope } from "./adapters/msal/auth.js";
 
 const log = createLogger("agent");
 

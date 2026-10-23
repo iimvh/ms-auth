@@ -26,12 +26,13 @@ import {
 import { createLogger, trunc, FRAME_DIR } from "./log.js";
 import { recordThrottle, recordTurn } from "./turn-budget.js";
 import { parseMetering, meteredAllowance, METERED_BUDGETS, type MeteredBudget } from "./priority-access.js";
-import { isPersonalMode, shouldSendCodeInterpreter } from "./personal-mode.js";
-import { PersonalAuthError, personalLoginCommand } from "./personal-auth.js";
-import type { PersonalCapture, PersonalRecord } from "./personal-session.js";
-import { PersonalStore, personalSessionFile } from "./personal-session.js";
+import { isPersonalMode, shouldSendCodeInterpreter } from "./adapters/personal/personal-mode.js";
+import { PersonalAuthError, personalLoginCommand } from "./adapters/personal/personal-auth.js";
+import type { PersonalCapture, PersonalRecord } from "./adapters/personal/personal-session.js";
+import { PersonalStore, personalSessionFile } from "./adapters/personal/personal-session.js";
 import { loginCommandFor, resolveAccount } from "./account-registry.js";
 import type { TurnContext } from "./turn-context.js";
+import "./personal-wiring.js";
 
 const RS = "\x1E";
 const log = createLogger("session");

@@ -1,4 +1,4 @@
-import { createLogger } from "./log.js";
+import { createLogger } from "../../log.js";
 import { personalCdpUrl } from "./personal-harvest-cdp.js";
 import type { PersonalRecord, PersonalRecordProblem, PersonalRecordState } from "./personal-session.js";
 import { PersonalStore, personalSessionFile } from "./personal-session.js";

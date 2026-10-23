@@ -1,9 +1,26 @@
 import { execSync } from "node:child_process";
-import { resolveAccount } from "./account-registry.js";
-import { createLogger } from "./log.js";
+import { resolveAccount } from "../../account-registry.js";
+import { createLogger } from "../../log.js";
 import type { PersonalCapture } from "./personal-session.js";
 
 const log = createLogger("personal-capture");
+
+export interface SignInCredentials {
+  email: string;
+  password: string;
+  mfaSecret: string;
+}
+
+export interface CaptureDeps {
+  loadSecrets: () => SignInCredentials | null;
+  driveSignInForm: (page: unknown, creds: SignInCredentials) => Promise<void>;
+}
+
+const hostDeps: { current: CaptureDeps | null } = { current: null };
+
+export function providePersonalCaptureDeps(deps: CaptureDeps): void {
+  hostDeps.current = deps;
+}
 
 export type PersonalCaptureErrorReason =
   | "not_chathub"
@@ -290,11 +307,10 @@ export function isLoginUrl(url: string): boolean {
 /** Stored email/password/TOTP when the operator has them — the same
  *  `secrets.json` the enterprise automated login uses. Unset/absent/short is
  *  simply "no automation, wait for a human". */
-async function storedSecrets(): Promise<{ email: string; password: string; mfaSecret: string } | null> {
+async function storedSecrets(deps: CaptureDeps): Promise<SignInCredentials | null> {
   if (process.env.M365_PERSONAL_AUTOMATED_LOGIN === "0") return null;
   try {
-    const { loadSecrets } = await import("./auth.js");
-    return loadSecrets();
+    return deps.loadSecrets();
   } catch {
     return null;
   }
@@ -338,6 +354,7 @@ export async function capturePersonalSession(opts: {
   /** Operator-facing progress lines (e.g. "sign in in the opened window").
    *  The CLI wires it to stdout; a mint leaves it unset (debug file only). */
   onEvent?: (line: string) => void;
+  deps?: CaptureDeps;
 }): Promise<PersonalCapture> {  const waitMs = opts.waitMs ?? Number(process.env.M365_PERSONAL_MINT_WAIT_MS ?? 10_000);
   log.debug(`capturing personal session (${opts.headed ? "headed" : "headless"}), waitMs=${waitMs}`);
   const { chromium } = await import("playwright");
@@ -407,11 +424,11 @@ export async function capturePersonalSession(opts: {
       // AGENTS auth order: silent → automated (secrets.json) → ask a human. The
       // visible window stays open, so both paths race and whichever finishes first
       // wins; automation needs M365_PERSONAL_AUTOMATED_LOGIN=0 to opt out.
-      const creds = await storedSecrets();
-      if (creds) {
+      const deps = opts.deps ?? hostDeps.current;
+      const creds = deps ? await storedSecrets(deps) : null;
+      if (creds && deps) {
         opts.onEvent?.("trying the stored credentials' automated sign-in");
-        const { driveSignInForm } = await import("./auth.js");
-        void driveSignInForm(page, creds)
+        void deps.driveSignInForm(page, creds)
           .then(() => log.debug("automated sign-in finished"))
           .catch((err) => log.debug("automated sign-in ended:", err?.message ?? err));
       }

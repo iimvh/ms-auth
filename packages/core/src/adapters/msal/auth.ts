@@ -33,9 +33,7 @@ export function getImageArtifactToken(): Promise<string | null> {
   return getTokenForScope(IMAGE_ARTIFACT_SCOPES);
 }
 
-import { createLogger } from "./log.js";
-import { getPersonalToken } from "./personal-auth.js";
-import { isPersonalMode } from "./personal-mode.js";
+import { createLogger } from "../../log.js";
 import { z } from "zod/v4";
 const log = createLogger("auth");
 
@@ -691,7 +689,6 @@ export async function getTokenForScope(scopes: string[]): Promise<string | null>
 let inflightToken: Promise<string> | null = null;
 
 export function getToken(): Promise<string> {
-  if (isPersonalMode()) return getPersonalToken();
   return (inflightToken ??= doGetToken().finally(() => {
     inflightToken = null;
   }));

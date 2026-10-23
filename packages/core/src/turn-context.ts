@@ -1,5 +1,5 @@
-﻿import type { AccountId } from "./account-registry.js";
-import type { PersonalRecord } from "./personal-session.js";
+import type { AccountId } from "./account-registry.js";
+import type { PersonalRecord } from "./adapters/personal/personal-session.js";
 
 export interface SessionStore {
   read(accountId: AccountId | null): PersonalRecord | null;

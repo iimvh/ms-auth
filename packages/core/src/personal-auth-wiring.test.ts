@@ -2,11 +2,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PersonalStore } from "./personal-session.js";
-import { personalProfileDir } from "./personal-session.js";
-import { getPersonalToken } from "./personal-auth.js";
+import { PersonalStore } from "./adapters/personal/personal-session.js";
+import { personalProfileDir } from "./adapters/personal/personal-session.js";
+import { getPersonalToken } from "./adapters/personal/personal-auth.js";
 
-vi.mock("./personal-harvest.js", () => {
+vi.mock("./adapters/personal/personal-harvest.js", () => {
   class HarvestError extends Error {
     constructor(readonly reason: string, message: string) {
       super(message);
@@ -15,7 +15,7 @@ vi.mock("./personal-harvest.js", () => {
   return { HarvestError, isHarvestError: (err: unknown) => err instanceof HarvestError };
 });
 
-vi.mock("./personal-capture.js", () => ({
+vi.mock("./adapters/personal/personal-capture.js", () => ({
   PersonalCaptureError: class extends Error {},
   capturePersonalSession: vi.fn(async () => ({
     accessToken: "tok-minted",
@@ -33,7 +33,7 @@ vi.mock("./personal-capture.js", () => ({
   })),
 }));
 
-const { capturePersonalSession } = await import("./personal-capture.js");
+const { capturePersonalSession } = await import("./adapters/personal/personal-capture.js");
 
 beforeEach(() => {
   (capturePersonalSession as ReturnType<typeof vi.fn>).mockClear();

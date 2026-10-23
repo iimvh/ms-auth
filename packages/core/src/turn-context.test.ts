@@ -21,14 +21,14 @@ const seams = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("./personal-harvest-cdp.js", () => ({ attachChatPage: () => Promise.reject(new Error("no browser")) }));
-vi.mock("./personal-auth.js", () => ({
+vi.mock("./adapters/personal/personal-harvest-cdp.js", () => ({ attachChatPage: () => Promise.reject(new Error("no browser")) }));
+vi.mock("./adapters/personal/personal-auth.js", () => ({
   PersonalAuthError: class PersonalAuthError extends Error {},
   personalLoginCommand: () => "pnpm m365-personal login",
 }));
 vi.mock("./account-registry.js", async (importOriginal) =>
   seams.wrap("account-registry", await importOriginal<Record<string, unknown>>()));
-vi.mock("./personal-mode.js", async (importOriginal) =>
+vi.mock("./adapters/personal/personal-mode.js", async (importOriginal) =>
   seams.wrap("personal-mode", await importOriginal<Record<string, unknown>>()));
 
 vi.mock("ws", async () => ({ default: (await import("./socket-fixture.js")).RecordingWebSocket }));

@@ -149,6 +149,8 @@ export {
   probePersonalCapture,
 } from "./session.js";
 
+export type { TurnContext, CredentialSource, SessionStore } from "./turn-context.js";
+
 export {
   parseActionConfirmation,
   buildResumeInvokeAction,

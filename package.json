@@ -13,7 +13,9 @@
     "test:unit": "pnpm build && npx vitest run",
     "test:live": "pnpm build && M365_LIVE=1 npx vitest run",
     "lint:boundaries": "node scripts/adapter-boundaries.ts --check",
-    "lint:boundaries:baseline": "node scripts/adapter-boundaries.ts --write-baseline"
+    "lint:boundaries:baseline": "node scripts/adapter-boundaries.ts --write-baseline",
+    "snapshot:exports": "pnpm --filter @m365-copilot/core build && node scripts/core-export-snapshot.ts --write",
+    "snapshot:exports:check": "node scripts/core-export-snapshot.ts --check"
   },
   "packageManager": "pnpm@10.32.1",
   "devDependencies": {

@@ -11,7 +11,7 @@ import {
   findCrossAdapterImports,
   loadBaseline,
   run,
-} from "../../../scripts/adapter-boundaries.ts";
+} from "../../../scripts/adapter-boundaries.js";
 
 const CORE_SRC = "packages/core/src";
 

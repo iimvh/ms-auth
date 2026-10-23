@@ -1,9 +1,9 @@
 {
   "adapterRoot": "packages/core/src/adapters",
   "nodes": [
-    "./personal-harvest.js",
     "node:child_process",
     "node:crypto",
+    "node:events",
     "node:fs",
     "node:os",
     "node:path",
@@ -24,14 +24,18 @@
     "packages/core/src/personal-capture.ts",
     "packages/core/src/personal-cli.ts",
     "packages/core/src/personal-harvest-cdp.ts",
+    "packages/core/src/personal-harvest.ts",
     "packages/core/src/personal-health.ts",
+    "packages/core/src/personal-mint-limits.ts",
     "packages/core/src/personal-mode.ts",
     "packages/core/src/personal-session.ts",
     "packages/core/src/priority-access.ts",
     "packages/core/src/schemas.ts",
     "packages/core/src/session.ts",
+    "packages/core/src/socket-fixture.ts",
     "packages/core/src/tools.ts",
     "packages/core/src/turn-budget.ts",
+    "packages/core/src/turn-context.ts",
     "playwright",
     "ws",
     "zod/v4"
@@ -126,7 +130,7 @@
       "from": "packages/core/src/auth.ts",
       "to": "otpauth",
       "specifier": "otpauth",
-      "line": 273
+      "line": 285
     },
     {
       "from": "packages/core/src/auth.ts",
@@ -147,13 +151,19 @@
       "from": "packages/core/src/auth.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 333
+      "line": 345
     },
     {
       "from": "packages/core/src/auth.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 502
+      "line": 514
+    },
+    {
+      "from": "packages/core/src/auth.ts",
+      "to": "zod/v4",
+      "specifier": "zod/v4",
+      "line": 39
     },
     {
       "from": "packages/core/src/copilot.ts",
@@ -229,18 +239,13 @@
     },
     {
       "from": "packages/core/src/index.ts",
-      "to": "./personal-harvest.js",
-      "line": 172
-    },
-    {
-      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/agent.ts",
       "line": 81
     },
     {
       "from": "packages/core/src/index.ts",
       "to": "packages/core/src/auth.ts",
-      "line": 175
+      "line": 178
     },
     {
       "from": "packages/core/src/index.ts",
@@ -250,37 +255,52 @@
     {
       "from": "packages/core/src/index.ts",
       "to": "packages/core/src/log.ts",
-      "line": 199
+      "line": 202
     },
     {
       "from": "packages/core/src/index.ts",
       "to": "packages/core/src/personal-auth.ts",
-      "line": 169
-    },
-    {
-      "from": "packages/core/src/index.ts",
-      "to": "packages/core/src/personal-capture.ts",
       "line": 171
     },
     {
       "from": "packages/core/src/index.ts",
-      "to": "packages/core/src/personal-harvest-cdp.ts",
-      "line": 173
-    },
-    {
-      "from": "packages/core/src/index.ts",
-      "to": "packages/core/src/personal-health.ts",
+      "to": "packages/core/src/personal-capture.ts",
       "line": 174
     },
     {
       "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-harvest-cdp.ts",
+      "line": 176
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-harvest.ts",
+      "line": 175
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-health.ts",
+      "line": 177
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-mint-limits.ts",
+      "line": 172
+    },
+    {
+      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/personal-mode.ts",
-      "line": 168
+      "line": 170
     },
     {
       "from": "packages/core/src/index.ts",
       "to": "packages/core/src/personal-session.ts",
-      "line": 170
+      "line": 173
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/turn-context.ts",
+      "line": 152
     },
     {
       "from": "packages/core/src/log.ts",
@@ -347,11 +367,6 @@
     },
     {
       "from": "packages/core/src/personal-auth.ts",
-      "to": "./personal-harvest.js",
-      "line": 3
-    },
-    {
-      "from": "packages/core/src/personal-auth.ts",
       "to": "packages/core/src/account-registry.ts",
       "line": 6
     },
@@ -369,6 +384,11 @@
       "from": "packages/core/src/personal-auth.ts",
       "to": "packages/core/src/personal-harvest-cdp.ts",
       "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-auth.ts",
+      "to": "packages/core/src/personal-harvest.ts",
+      "line": 3
     },
     {
       "from": "packages/core/src/personal-auth.ts",
@@ -467,11 +487,6 @@
     },
     {
       "from": "packages/core/src/personal-harvest-cdp.ts",
-      "to": "./personal-harvest.js",
-      "line": 4
-    },
-    {
-      "from": "packages/core/src/personal-harvest-cdp.ts",
       "to": "packages/core/src/account-registry.ts",
       "line": 3
     },
@@ -487,6 +502,11 @@
     },
     {
       "from": "packages/core/src/personal-harvest-cdp.ts",
+      "to": "packages/core/src/personal-harvest.ts",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-harvest-cdp.ts",
       "to": "playwright",
       "specifier": "playwright",
       "line": 2
@@ -496,6 +516,21 @@
       "to": "playwright",
       "specifier": "playwright",
       "line": 53
+    },
+    {
+      "from": "packages/core/src/personal-harvest.ts",
+      "to": "packages/core/src/log.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/personal-harvest.ts",
+      "to": "packages/core/src/personal-capture.ts",
+      "line": 2
+    },
+    {
+      "from": "packages/core/src/personal-harvest.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 3
     },
     {
       "from": "packages/core/src/personal-health.ts",
@@ -516,6 +551,12 @@
       "from": "packages/core/src/personal-health.ts",
       "to": "packages/core/src/personal-session.ts",
       "line": 4
+    },
+    {
+      "from": "packages/core/src/personal-mint-limits.ts",
+      "to": "zod/v4",
+      "specifier": "zod/v4",
+      "line": 1
     },
     {
       "from": "packages/core/src/personal-mode.ts",
@@ -547,12 +588,18 @@
     {
       "from": "packages/core/src/personal-session.ts",
       "to": "packages/core/src/account-registry.ts",
-      "line": 3
+      "line": 4
     },
     {
       "from": "packages/core/src/personal-session.ts",
       "to": "packages/core/src/log.ts",
-      "line": 4
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/personal-session.ts",
+      "to": "zod/v4",
+      "specifier": "zod/v4",
+      "line": 3
     },
     {
       "from": "packages/core/src/schemas.ts",
@@ -619,8 +666,19 @@
     },
     {
       "from": "packages/core/src/session.ts",
+      "to": "packages/core/src/turn-context.ts",
+      "line": 34
+    },
+    {
+      "from": "packages/core/src/session.ts",
       "to": "ws",
       "specifier": "ws",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/socket-fixture.ts",
+      "to": "node:events",
+      "specifier": "node:events",
       "line": 1
     },
     {
@@ -650,6 +708,11 @@
       "from": "packages/core/src/turn-budget.ts",
       "to": "packages/core/src/log.ts",
       "line": 4
+    },
+    {
+      "from": "packages/core/src/turn-context.ts",
+      "to": "packages/core/src/personal-session.ts",
+      "line": 2
     }
   ]
 }

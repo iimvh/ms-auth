@@ -23,11 +23,27 @@ import {
   registryStatus,
   removeAccount,
   renameAccount,
+  resolveAccount,
   useMockRegistry,
   writeRegistry,
   type AccountRegistry,
 } from "./account-registry.js";
-import { PersonalStore } from "./personal-session.js";
+import { PersonalStore, personalProfileDir, personalSessionFile } from "./personal-session.js";
+import { personalCdpUrl } from "./personal-harvest-cdp.js";
+import { chromeCommandLine, probeCdpTarget } from "./personal-auth.js";
+
+const withEnv = <T>(vars: Record<string, string>, fn: () => T): T => {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+};
 
 // `allocateAccount` and the mock write into `<config>/accounts/<id>/`, and the
 // id lives under the real config dir whenever the registry path alone is
@@ -331,5 +347,70 @@ describe("account CRUD", () => {
     writeFileSync(file, "{ not json");
     try { addAccount("work", "Work"); } catch (e) { expect((e as AccountError).code).toBe("registry_invalid"); }
     expect(readFileSync(file, "utf8")).toBe("{ not json");
+  });
+});
+
+describe("resolveAccount", () => {
+  it("returns today's env-or-default values with no registry", () => {
+    clearMockRegistry();
+    process.env.M365_ACCOUNTS_FILE = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    const r = resolveAccount();
+    expect(r).toMatchObject({ id: null, source: "builtin",
+      sessionFile: join(configDir(), "personal-session.json"),
+      profileDir: join(configDir(), "personal-profile"), cdpUrl: "http://127.0.0.1:9222" });
+  });
+
+  it("follows the active account, per call", () => {
+    useMockRegistry([{ id: "default" }, { id: "work", cdpPort: 9223 }]);
+    expect(resolveAccount()).toMatchObject({ id: "default", source: "registry", cdpUrl: "http://127.0.0.1:9222" });
+    activateAccount("work");
+    expect(personalSessionFile()).toBe(join(accountsDir(), "work", "session.json"));
+    expect(personalProfileDir()).toBe(join(accountsDir(), "work", "profile"));
+    expect(personalCdpUrl()).toBe("http://127.0.0.1:9223");
+  });
+
+  it("a CLI id wins for that call only", () => {
+    useMockRegistry([{ id: "default" }, { id: "work", cdpPort: 9223 }]);
+    expect(resolveAccount({ id: "work" })).toMatchObject({ id: "work", source: "cli" });
+    expect(resolveAccount().id).toBe("default");
+    expect(() => resolveAccount({ id: "gone" })).toThrow(/gone/);
+  });
+
+  it("an env override beats the registry, and says so exactly once", () => {
+    useMockRegistry([{ id: "default" }, { id: "work", cdpPort: 9223 }]);
+    const lines: string[] = [];
+    const r = withEnv({ M365_PERSONAL_CDP_URL: "http://127.0.0.1:9999" }, () => resolveAccount({ onWarn: (l) => lines.push(l) }));
+    expect(r.cdpUrl).toBe("http://127.0.0.1:9999");
+    expect(r.source).toBe("env");
+    expect(lines.filter((l) => l.includes("overrides the registry"))).toHaveLength(1);
+    expect(lines[0]).toContain("M365_PERSONAL_CDP_URL overrides the registry; account switching will not change the CDP target");
+    withEnv({ M365_PERSONAL_CDP_URL: "http://127.0.0.1:9999" }, () => { resolveAccount(); resolveAccount(); });
+    // still one override line: the warning is once per process per variable
+    expect(lines.filter((l) => l.includes("overrides the registry"))).toHaveLength(1);
+  });
+  it("warns on a partial override too - it splits the pair", () => {
+    useMockRegistry([{ id: "default" }]);
+    const lines: string[] = [];
+    withEnv({ M365_PERSONAL_PROFILE: "/tmp/elsewhere" }, () => resolveAccount({ onWarn: (l) => lines.push(l) }));
+
+    expect(lines).toHaveLength(2); // the override line, then the split-pair line
+    expect(lines.join("\n")).toContain("splits the record/profile/CDP pair");
+    expect(lines.some((l) => l.includes("M365_PERSONAL_PROFILE"))).toBe(true);
+  });
+  it("falls back to the builtin layout when the registry is broken", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ar-")), "accounts.json");
+    process.env.M365_ACCOUNTS_FILE = file;
+    writeFileSync(file, "{ not json");
+    expect(resolveAccount().source).toBe("builtin");
+  });
+});
+
+describe("the mint path's CDP target", () => {
+  it("probeCdpTarget and chromeCommandLine follow the active account", () => {
+    useMockRegistry([{ id: "default" }, { id: "work", cdpPort: 9223 }]);
+    activateAccount("work");
+    expect(probeCdpTarget()).toBe("http://127.0.0.1:9223");
+    expect(chromeCommandLine()).toContain(`--remote-debugging-port=9223`);
+    expect(chromeCommandLine()).toContain(`--user-data-dir="${join(accountsDir(), "work", "profile")}"`);
   });
 });

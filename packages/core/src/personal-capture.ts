@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { resolveAccount } from "./account-registry.js";
 import { createLogger } from "./log.js";
 import type { PersonalCapture } from "./personal-session.js";
 
@@ -88,6 +89,11 @@ export function parsePersonalCapture(wsUrl: string, sentFrames: string[]): Perso
     // A256CBC-HS512, zip=DEF) — its claims are not readable without Microsoft's
     // key (F98). Treat a non-JWT as opaque and estimate a TTL; the staleness
     // policy then mints early, and a wrong estimate only costs one mint.
+    //
+    // The default 1 h is NOT a measurement: a captured token kept serving turns
+    // at least 77 minutes after capture (measured 2026-10-23), and the page's
+    // own MSAL credential for the same account lives 8 h. The socket token's
+    // real lifetime is unknown — see docs/personal-mint-design.md.
     if (!(err instanceof PersonalCaptureError) || err.reason !== "not_a_jwt") throw err;
     const ttl = Number(process.env.M365_PERSONAL_TOKEN_TTL_MS ?? 3_600_000);
     if (!Number.isFinite(ttl) || ttl <= 0) throw err;
@@ -337,10 +343,13 @@ export async function capturePersonalSession(opts: {
   const { chromium } = await import("playwright");
   // Cloudflare's "verify you are human" gate refuses a Playwright-launched
   // browser no matter how the window is dressed: the launch itself is the
-  // fingerprint. With M365_PERSONAL_CDP_URL set, the operator starts a REAL
-  // Chrome (`--remote-debugging-port=9222 --user-data-dir=<profile dir>`) and we
-  // attach over CDP instead — nothing to launch, no automation flag (F101).
-  const cdpUrl = process.env.M365_PERSONAL_CDP_URL;
+  // fingerprint. With a registry (an active account) or M365_PERSONAL_CDP_URL
+  // set, the operator starts a REAL Chrome (`--remote-debugging-port=<port>
+  // --user-data-dir=<profile dir>`) and we attach over CDP instead — nothing to
+  // launch, no automation flag (F101). The account's own CDP target is what
+  // keeps a capture from ever landing in another account's profile.
+  const resolved = resolveAccount();
+  const cdpUrl = resolved.id !== null || process.env.M365_PERSONAL_CDP_URL ? resolved.cdpUrl : null;
   const attached = cdpUrl ? await chromium.connectOverCDP(cdpUrl) : null;
   const context = attached
     ? attached.contexts()[0] ?? (await attached.newContext())

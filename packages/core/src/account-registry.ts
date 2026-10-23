@@ -730,3 +730,125 @@ function isInside(p: string, dir: string): boolean {
   const rel = relative(dir, p);
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
+
+/** Which account answers this call, and where its record, Chrome profile and
+ *  CDP endpoint are. `id: null` means the builtin layout: no registry, so
+ *  today's `M365_PERSONAL_*`-or-default values. */
+export interface ResolvedAccount {
+  /** null = builtin layout (no registry). */
+  id: AccountId | null;
+  sessionFile: string;
+  profileDir: string;
+  /** `http://127.0.0.1:<port>` */
+  cdpUrl: string;
+  source: "cli" | "env" | "registry" | "builtin";
+}
+
+export interface ResolveAccountOptions {
+  /** A CLI `--account <id>`: this call only, and never silently ignored. */
+  id?: AccountId | null;
+  /** Where to report override warnings; defaults to the accounts logger. */
+  env?: Record<string, string | undefined>;
+  onWarn?: (line: string) => void;
+}
+
+/** The three settings a builtin layout can come from, in the order that decides
+ *  precedence (§7.2.2). */
+const PERSONAL_SETTINGS = [
+  { env: "M365_PERSONAL_SESSION_FILE", what: "session file", fallback: () => join(configDir(), "personal-session.json") },
+  { env: "M365_PERSONAL_PROFILE", what: "browser profile", fallback: () => join(configDir(), "personal-profile") },
+  { env: "M365_PERSONAL_CDP_URL", what: "CDP target", fallback: () => `http://127.0.0.1:${ACCOUNT_CDP_PORT}` },
+] as const;
+
+/** One line per process per variable: a stale override in a shell profile
+ *  would otherwise silently defeat a switch on every request. */
+const warned = new Set<string>();
+
+function warnOnce(key: string, line: string, onWarn?: (line: string) => void): boolean {
+  if (warned.has(key)) return false;
+  warned.add(key);
+  if (onWarn) onWarn(line);
+  else log.info(line);
+  return true;
+}
+
+/** The account serving this call. Read on every call - never cached - so a
+ *  switch takes effect on the next request without a restart. */
+export function resolveAccount(opts: ResolveAccountOptions = {}): ResolvedAccount {
+  const env = opts.env ?? process.env;
+  const builtin: Omit<ResolvedAccount, "id" | "source"> = {
+    sessionFile: env.M365_PERSONAL_SESSION_FILE || PERSONAL_SETTINGS[0].fallback(),
+    profileDir: env.M365_PERSONAL_PROFILE || PERSONAL_SETTINGS[1].fallback(),
+    cdpUrl: env.M365_PERSONAL_CDP_URL || PERSONAL_SETTINGS[2].fallback(),
+  };
+
+  const registry = readRegistry(accountRegistrySource()).registry;
+  const overrides = PERSONAL_SETTINGS.filter((s) => Boolean(env[s.env]));
+
+  if (opts.id) {
+    const entry = registry?.accounts.find((a) => a.id === opts.id);
+    if (!entry) {
+      const known = registry?.accounts.map((a) => a.id) ?? [];
+      throw new AccountError(
+        "not_found",
+        `account "${opts.id}" does not exist`,
+        `known accounts: ${known.join(", ") || "none"}`,
+      );
+    }
+    return resolvedFrom(entry, "cli");
+  }
+
+  if (overrides.length > 0) {
+    let reported = false;
+    for (const s of overrides) {
+      reported =
+        warnOnce(
+          s.env,
+          registry
+            ? `${s.env} overrides the registry; account switching will not change the ${s.what}`
+            : `${s.env} overrides the default ${s.what}`,
+          opts.onWarn,
+        ) || reported;
+    }
+    if (overrides.length < PERSONAL_SETTINGS.length) {
+      // A partial override splits the pair. It is said once per process, but an
+      // explicit `onWarn` caller — a CLI or a test — drains both lines on the
+      // call it reads them from, so it always hears this one.
+      const line = `only ${overrides.map((s) => s.env).join(", ")} ${overrides.length > 1 ? "are" : "is"} set - a partial override splits the record/profile/CDP pair; set all three or none`;
+      if (!warnOnce("partial", line, opts.onWarn) && opts.onWarn && reported) opts.onWarn(line);
+    }
+    return { id: null, source: "env", ...builtin };
+  }
+
+  if (registry) {
+    const entry = registry.accounts.find((a) => a.id === registry.activeId) ?? registry.accounts[0];
+    if (entry) {
+      return resolvedFrom(entry, "registry");
+    }
+  }
+
+  // The builtin layout keeps today's side effect: the config dir is created so
+  // a first-ever login has somewhere to write the record.
+  try {
+    mkdirSync(configDir(), { recursive: true });
+  } catch (err) {
+    log.debug("creating the config dir failed:", err);
+  }
+  return { id: null, source: "builtin", ...builtin };
+}
+
+function resolvedFrom(entry: AccountEntry, source: ResolvedAccount["source"]): ResolvedAccount {
+  return {
+    id: entry.id,
+    sessionFile: entry.sessionFile,
+    profileDir: entry.profileDir,
+    cdpUrl: `http://127.0.0.1:${entry.cdpPort}`,
+    source,
+  };
+}
+
+/** The key that per-account process state (mint mutex, backoff, turn budget)
+ *  is held under: the account id, or null for the builtin layout. */
+export function accountKeyOf(id: AccountId | null | undefined): string | null {
+  return id ?? null;
+}

@@ -1,17 +1,9 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { resolveAccount } from "./account-registry.js";
 import { createLogger } from "./log.js";
 
 const log = createLogger("personal-session");
-
-const CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
-
-function resolveFile(envVar: string, defaultName: string): string {
-  if (process.env[envVar]) return process.env[envVar]!;
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  return join(CONFIG_DIR, defaultName);
-}
 
 /** One turn's worth of captured connection parameters, exactly as the real
  *  m365.cloud.microsoft/chat client sent them (§6.1 of the personal-auth spec). */
@@ -52,6 +44,41 @@ function isPersonalRecord(value: unknown): value is PersonalRecord {
   );
 }
 
+/** The fields `isPersonalRecord` insists on, named for the operator's benefit:
+ *  "missing expiresAt" is actionable, "wrong shape" is not. */
+function missingRecordFields(value: unknown): string[] {
+  if (typeof value !== "object" || value === null) return ["the whole record (not an object)"];
+  const r = value as Record<string, unknown>;
+  const problems: string[] = [];
+  if (typeof r.accessToken !== "string") problems.push("accessToken");
+  if (typeof r.chathubPath !== "string") problems.push("chathubPath");
+  if (typeof r.expiresAt !== "number") problems.push("expiresAt");
+  return problems;
+}
+
+/** Why a stored record could not be used. `absent` is the ordinary "nothing has
+ *  been captured yet"; the rest mean a file IS there but cannot be trusted, and
+ *  telling them apart matters: `absent` is fixed by `login`, a corrupt file is a
+ *  bug or a bad hand-edit and `login` overwrites evidence of it. */
+export type PersonalRecordProblem =
+  | "absent"
+  | "unreadable"
+  | "invalid_json"
+  | "wrong_shape";
+
+/** What `PersonalStore.inspect()` found: the record when usable, otherwise the
+ *  reason and enough detail to say something useful. */
+export type PersonalRecordState =
+  | { ok: true; record: PersonalRecord }
+  | { ok: false; problem: PersonalRecordProblem; detail: string };
+
+/** Strip a UTF-8 byte-order mark. Windows editors (and PowerShell's
+ *  `Set-Content -Encoding UTF8`) write one, and `JSON.parse` rejects it — a
+ *  perfectly good record would otherwise read as "no session stored". */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 /** The `personal-session.json` cache. Re-reads on every use — the cache key
  *  is the raw file bytes (mtime+size alone hides sub-tick changes on
  *  Windows), so a `login` in another process takes effect without a restart
@@ -61,45 +88,85 @@ export class PersonalStore {
   readonly path: string;
   private cache: PersonalRecord | null = null;
   private cacheKey: string | null = null;
+  private state: PersonalRecordState | null = null;
 
   constructor(file: string) {
     this.path = file;
   }
 
+  /** The record, or null when there is nothing usable. Callers that need to
+   *  distinguish "never captured" from "captured but broken" use `inspect()`. */
   read(): PersonalRecord | null {
+    const state = this.inspect();
+    return state.ok ? state.record : null;
+  }
+
+  /** The record plus, when there is no usable record, why. Never throws. */
+  inspect(): PersonalRecordState {
     let raw: string;
-    let key: string;
     try {
       raw = readFileSync(this.path, "utf8");
-      const s = statSync(this.path);
-      const st = { mtimeMs: s.mtimeMs, size: s.size };
       // Windows papers over sub-tick writes (two renames inside one timestamp
       // tick), so mtime+size alone can hide a change; the raw bytes are the
-      // authoritative key. The stat pair is only a debug-friendly hint.
-      key = raw;
-      void st;
-    } catch {
-      this.cache = null;
-      this.cacheKey = null;
-      return null;
+      // authoritative key.
+    } catch (err) {
+      const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
+      if (missing) {
+        this.clearCache();
+        return this.setState({ ok: false, problem: "absent", detail: "no personal session file" });
+      }
+      // Present but unreadable (permissions, a directory, a locked file).
+      this.clearCache();
+      return this.setState({
+        ok: false,
+        problem: "unreadable",
+        detail: `${this.path}: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
-    if (this.cache && this.cacheKey === key) return this.cache;
-    this.cacheKey = key;
+
+    // The cache key includes the BOM state, so a file rewritten with one is a
+    // different entry even when the JSON text is otherwise identical.
+    if (this.state && this.cacheKey === raw) return this.state;
+
+    const text = stripBom(raw);
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(text);
     } catch (err) {
-      log.debug("personal record is not valid JSON, treating as absent:", err);
+      log.debug("personal record is not valid JSON:", err);
       this.cache = null;
-      return null;
+      this.cacheKey = raw;
+      const hint = raw.charCodeAt(0) === 0xfeff ? " (a UTF-8 BOM is handled; the rest is not JSON)" : "";
+      return this.setState({
+        ok: false,
+        problem: "invalid_json",
+        detail: `${this.path} is not valid JSON${hint}: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
     if (!isPersonalRecord(parsed)) {
-      log.debug("personal record failed the shape check, treating as absent");
+      log.debug("personal record failed the shape check");
       this.cache = null;
-      return null;
+      this.cacheKey = raw;
+      const missing = missingRecordFields(parsed);
+      return this.setState({
+        ok: false,
+        problem: "wrong_shape",
+        detail: `${this.path} is not a personal session record (missing or invalid: ${missing.join(", ") || "unknown"})`,
+      });
     }
     this.cache = parsed;
-    return this.cache;
+    this.cacheKey = raw;
+    return this.setState({ ok: true, record: parsed });
+  }
+
+  private clearCache(): void {
+    this.cache = null;
+    this.cacheKey = null;
+  }
+
+  private setState(state: PersonalRecordState): PersonalRecordState {
+    this.state = state;
+    return state;
   }
 
   write(record: PersonalRecord): void {
@@ -118,6 +185,9 @@ export class PersonalStore {
     }
     this.cache = record;
     this.cacheKey = raw;
+    // The state cache is the one `inspect()` serves; leaving it stale here would
+    // hand the caller the record we just replaced.
+    this.state = { ok: true, record };
   }
 
   delete(): void {
@@ -126,8 +196,8 @@ export class PersonalStore {
     } catch (err) {
       log.debug("delete of the personal record failed (ok if absent):", err);
     }
-    this.cache = null;
-    this.cacheKey = null;
+    this.clearCache();
+    this.state = { ok: false, problem: "absent", detail: "no personal session file" };
   }
 
   isFresh(record: PersonalRecord, now: number = Date.now()): boolean {
@@ -138,9 +208,9 @@ export class PersonalStore {
 }
 
 export function personalSessionFile(): string {
-  return resolveFile("M365_PERSONAL_SESSION_FILE", "personal-session.json");
+  return resolveAccount().sessionFile;
 }
 
 export function personalProfileDir(): string {
-  return resolveFile("M365_PERSONAL_PROFILE", "personal-profile");
+  return resolveAccount().profileDir;
 }

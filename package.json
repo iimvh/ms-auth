@@ -12,6 +12,7 @@
     "test": "pnpm test:unit",
     "test:unit": "pnpm build && npx vitest run",
     "test:live": "pnpm build && M365_LIVE=1 npx vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint:boundaries": "node scripts/adapter-boundaries.ts --check",
     "lint:boundaries:baseline": "node scripts/adapter-boundaries.ts --write-baseline",
     "snapshot:exports": "pnpm --filter @m365-copilot/core build && node scripts/core-export-snapshot.ts --write",

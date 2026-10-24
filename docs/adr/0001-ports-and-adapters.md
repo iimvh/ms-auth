@@ -75,8 +75,7 @@ directory names under `adapters/`, and both are the only two names on that axis.
 receives a `TurnContext` and never learns which mode produced it.
 
 `index.ts` keeps every export it has today, byte for byte. No package version
-changes. `packages/proxy-lib` and `packages/openclaw-plugin` are untouched in this
-phase.
+changes. `packages/proxy-lib` is untouched in this phase.
 
 Exactly one boundary rule is enforced:
 

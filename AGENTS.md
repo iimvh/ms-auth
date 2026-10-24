@@ -2,20 +2,6 @@
 
 Guidance for AI agents (and humans) working in this repo.
 
-## Agent skills
-
-### Issue tracker
-
-Issues live in GitHub Issues for `iimvh/ms-auth`, driven by the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-The five canonical roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `GLOSSARY.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
-
 ## What this is
 
 `m365-copilot-proxy` wraps Microsoft 365 Copilot's undocumented SignalR/WebSocket

@@ -8,8 +8,7 @@ Use Microsoft 365 Copilot as an LLM backend for OpenAI-compatible coding agents 
 
 M365 Copilot uses a SignalR WebSocket protocol, not the OpenAI API. This project translates between the two:
 
-1. **Standalone proxy** — HTTP server with `/v1/chat/completions` and `/v1/models` endpoints. Works with any OpenAI-compatible client (pi, OpenClaw, etc.).
-2. **OpenClaw plugin** — Config generator + setup CLI for OpenClaw's provider system.
+**Standalone proxy** — HTTP server with `/v1/chat/completions` and `/v1/models` endpoints. Works with any OpenAI-compatible client (pi, OpenClaw, etc.).
 
 ### Tool calling
 
@@ -49,8 +48,7 @@ Each agent session reuses the same M365 conversation (same `sessionId` + `conver
 
 ```
 @m365-copilot/core          — Shared: auth, WebSocket client, tool formatting, proxy server, agent management, session
-├── @m365-copilot/proxy     — Standalone HTTP proxy binary
-└── @m365-copilot/openclaw-plugin  — OpenClaw config generator + setup CLI + skill
+└── @m365-copilot/proxy     — Standalone HTTP proxy binary
 ```
 
 ## Setup

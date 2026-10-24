@@ -52,3 +52,12 @@ opencode.jsonc
 
 # Local planning/spec workspace (not published)
 docs/superpowers/
+.scratch/
+
+# Personal docs: planning notes and agent-working rules stay local; only
+# AGENTS.md itself is tracked
+docs/personal-mint-design.md
+docs/personal-mint-issue.md
+docs/run-guide.md
+docs/agents/
+skills-lock.json

@@ -4,9 +4,6 @@ import { resolveAccount } from "../../account-registry.js";
 
 export type AuthMode = "msal" | "personal";
 
-/** Which auth path this process runs. Defaults to today's enterprise MSAL;
- *  an unknown value fails here, so everything that reads it at boot can name
- *  the allowed values (Global Constraints). */
 export function resolveAuthMode(): AuthMode {
   const raw = process.env.M365_AUTH ?? "msal";
   const mode = raw.toLowerCase();
@@ -18,7 +15,6 @@ export function isPersonalMode(): boolean {
   return resolveAuthMode() === "personal";
 }
 
-/** Personal mode turns off everything an MSA token cannot serve (spec §10.4). */
 export function personalModeDefaults(): { useAgent: false; codeInterpreter: boolean; imageGeneration: false } {
   return {
     useAgent: false,
@@ -27,10 +23,6 @@ export function personalModeDefaults(): { useAgent: false; codeInterpreter: bool
   };
 }
 
-/** Code-interpreter optionsSets are what pull agent-less models into M365's
- *  own sandbox (§10.4): send them on the agent-less path — never on the agent
- *  path — except in personal mode, where the sandbox stays off unless the
- *  operator passes M365_PERSONAL_CODE_INTERPRETER=1. */
 export function shouldSendCodeInterpreter(agentId: string | null | undefined, personal?: boolean): boolean {
   const isPersonal = personal ?? isPersonalMode();
   if (agentId != null) return false;
@@ -38,10 +30,6 @@ export function shouldSendCodeInterpreter(agentId: string | null | undefined, pe
   return true;
 }
 
-/** The default upstream model in personal mode: `M365_PERSONAL_MODEL` wins,
- *  then the model the login-time capability probe got an answer from — the
- *  explicit argument (the CLI calls it with the record it just wrote) or, in
- *  the proxy path, the probe stored in the session record (spec §10.1). */
 export function personalDefaultModel(
   probe?: { model: string; ok: boolean; at: number } | null,
 ): string | null {

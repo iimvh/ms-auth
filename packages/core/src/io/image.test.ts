@@ -31,7 +31,6 @@ describe("buildImagePrompt", () => {
 
 describe("classifyImageFailure", () => {
   it("flags the daily image cap as quota_exceeded (verbatim from a live exhaustion)", () => {
-    // The exact text M365 returned once the account's daily image budget ran out.
     expect(classifyImageFailure(
       "Sorry, I can’t generate any more images today. Try again tomorrow, or ask me to find similar images on the web instead.",
     )).toBe("quota_exceeded");

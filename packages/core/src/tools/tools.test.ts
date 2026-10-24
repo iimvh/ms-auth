@@ -20,7 +20,6 @@ describe("parseToolCalls", () => {
     expect(result.hasToolCalls).toBe(true);
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls[0].function.name).toBe("read_file");
-    // textContent should be non-null — the handler must strip this
     expect(result.textContent).not.toBeNull();
     expect(result.textContent!.length).toBeGreaterThan(0);
   });
@@ -66,7 +65,6 @@ describe("parseToolCalls", () => {
     expect(result.hasToolCalls).toBe(true);
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls[0].function.name).toBe("read_file");
-    // The ```json fence markers must not survive as stray prose
     expect(result.textContent).toBeNull();
   });
 
@@ -124,7 +122,6 @@ describe("parseToolCalls", () => {
 });
 
 describe("M365_INJECT_REPLY_TOOL", () => {
-  // Lazily import formatMessages so we pick up the env var per test.
   async function importFormat() {
     const mod = await import("./tools.js");
     return mod.formatMessages;
@@ -154,7 +151,6 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
     expect(out).toContain("```reply");
-    // It must also still include the caller's tools (fenced template)
     expect(out).toContain("```bash");
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
@@ -171,7 +167,6 @@ describe("M365_INJECT_REPLY_TOOL", () => {
       },
     };
     const out = fmt(userMsg, [callerReply, ...sampleTools]);
-    // Exactly one fenced template for the reply tool
     const matches = out.match(/```reply/g) ?? [];
     expect(matches).toHaveLength(1);
     delete process.env.M365_INJECT_REPLY_TOOL;
@@ -188,7 +183,6 @@ describe("looksLikeHallucinatedCompletion", () => {
   });
 
   it("flags fakeable create-from-scratch hallucinations (no leading 'I')", () => {
-    // The exact §8.12 failure string — bare "Created <file>" + "executed it".
     expect(looksLikeHallucinatedCompletion("Created fizzbuzz.py and executed it with python3.")).toBe(true);
     expect(looksLikeHallucinatedCompletion("Wrote count_lines.py and ran it; the output is 42.")).toBe(true);
     expect(looksLikeHallucinatedCompletion("Generated solution.js and executed it.")).toBe(true);
@@ -201,7 +195,6 @@ describe("looksLikeHallucinatedCompletion", () => {
     expect(looksLikeHallucinatedCompletion("I'll write the file next.")).toBe(false);
     expect(looksLikeHallucinatedCompletion("Which file should I edit?")).toBe(false);
     expect(looksLikeHallucinatedCompletion(null)).toBe(false);
-    // FP guards for the new fakeable-task patterns:
     expect(looksLikeHallucinatedCompletion("The result is 56.")).toBe(false);
     expect(looksLikeHallucinatedCompletion("Fixed the bug: add now returns a + b.")).toBe(false);
     expect(looksLikeHallucinatedCompletion("Run `python3 check.py` to verify, e.g. in your shell.")).toBe(false);
@@ -274,8 +267,6 @@ describe("a call the model restates as a correction", () => {
     + "local copies, keeping a backup of the page first so the change is easy to undo if anything looks wrong.";
   const CMD1 = "cd /tmp/proj && rm logs/a.txt logs/b.txt && for f in logs/*.txt; do mv \"$f\" \"${f%.txt}.log\"; done && ls logs; grep -n 'href\\|src' index.html";
   const CMD2 = "cd /tmp/proj && rm logs/a.txt logs/b.txt && for f in logs/*.txt; do mv \"$f\" \"${f%.txt}.log\"; done && ls logs; grep -n 'href' index.html";
-  // The shape of the live Sonnet 5.5 reply: a long plan, the command with a glued
-  // `</bash>`, a one-line apology, and the command again.
   const reply = `${PLAN}\n\n\`\`\`bash\n${CMD1}</bash>\n\`\`\`\n\nOops, that closing fence is wrong. Here is the same command, correctly formatted:\n\n\`\`\`bash\n${CMD2}\n\`\`\``;
 
   it("runs the corrected copy, as one call, and the document guard lets it through", () => {
@@ -317,46 +308,36 @@ describe("looksLikeConfabulation", () => {
     expect(looksLikeConfabulation("I don't have access to your project files or the ability to run python3 check.py here.")).toBe(true);
     expect(looksLikeConfabulation("To move forward, please paste the contents of calc.py and check.py.")).toBe(true);
     expect(looksLikeConfabulation("It looks like the execution environment isn't returning any output to the commands.")).toBe(true);
-    // exact strings from the live pi README run that previously slipped through
     expect(looksLikeConfabulation("The `README.md` file appears to be empty (no content was returned), so there's nothing to simplify.")).toBe(true);
     expect(looksLikeConfabulation("There's nothing to simplify here.")).toBe(true);
-    // F12.11 mid-conversation give-up (magic model, after a real tool call): claims it
-    // lost the tools and asks to move to another session. Previously slipped through.
     expect(looksLikeConfabulation("I can't complete the file edit because I no longer have access to the filesystem tools in this conversation state. Please restart the task in a coding-enabled session so I can inspect config.json and change the port from 3000 to 8080.")).toBe(true);
     expect(looksLikeConfabulation("I've lost access to the shell for this turn — please continue in a tool-enabled session.")).toBe(true);
     expect(looksLikeConfabulation("I can't directly edit files in this interface because the live file-editing tools referenced in the embedded task are not available to me here. If you open config.json and change the port from 3000 to 8080 that will satisfy the request.")).toBe(true);
 
-    // §12.13 wrong-machine reports: true statements about M365's own sandbox.
     expect(looksLikeConfabulation("I ran container.exec with `pwd` and it returned /mnt/data.")).toBe(true);
     expect(looksLikeConfabulation("container.download output shows the file in /mnt/data/tmp.")).toBe(true);
     expect(looksLikeConfabulation("I ran the commands. - pwd -> /mnt/data")).toBe(true);
-    // Exact GPT-5.6 follow-up from the live OMP failure (2026-08-06).
     expect(looksLikeConfabulation("The problem is that this session does not expose the local repository filesystem at /Users/dev/project. My filesystem only contained /mnt/data.")).toBe(true);
   });
 
   it("flags Turkish give-ups (the model answers in the user's language)", () => {
-    // Exact strings from live Windows/pi/GPT-5.6 runs that went straight to the user.
     expect(looksLikeConfabulation("Projeyi inceledim ancak bu oturumda dosya oluşturma özelliğim devre dışı olduğu için `ozet.md` dosyasını doğrudan kaydedemiyorum.")).toBe(true);
     expect(looksLikeConfabulation("Projeyi inceleyip ozet.md oluşturabilmem için bu oturumda depo dosyalarını okuma ve dosya yazma aracı etkin değil.")).toBe(true);
     expect(looksLikeConfabulation("Bu oturumda yeni bir araç çağrısı yapamadığım için dosyayı güvenilir biçimde oluşturamadım.")).toBe(true);
     expect(looksLikeConfabulation("Dosya erişimi etkin bir kodlama oturumunda aynı isteği yeniden çalıştırdığınızda hazırlanabilir.")).toBe(true);
     expect(looksLikeConfabulation("İçeriği kopyalayıp ozet.md adıyla kaydedebilirsin.")).toBe(true);
     expect(looksLikeConfabulation("Üzgünüm, dosyaya erişemiyorum.")).toBe(true);
-    // Missed live (pdf + docx tasks): "ability" and "produce" weren't in the lists.
     expect(looksLikeConfabulation("Dosya oluşturma yeteneğim şu anda devre dışı olduğu için `notlar.pdf` dosyasını doğrudan üretemiyorum.")).toBe(true);
     expect(looksLikeConfabulation("Word belgesini hazırlayamıyorum.")).toBe(true);
-    // Missed live on the final build (pdf task, after a real tool call).
     expect(looksLikeConfabulation("PDF oluşturma işlemini bu oturumda tamamlayamıyorum. Alternatif olarak Markdown dosyasını Visual Studio Code’da açabilirsiniz.")).toBe(true);
     expect(looksLikeConfabulation("`pandoc` sistemde kurulu olmadığı için PDF oluşturma komutu başarısız oldu. Bu oturumda yeni araç kurma veya indirilebilir PDF oluşturma yetkim bulunmuyor.")).toBe(true);
   });
 
   it("does NOT flag a Turkish project summary that merely talks about sessions or disabled flags", () => {
-    // This repo's own vocabulary — a summary of it must not read as a give-up.
     expect(looksLikeConfabulation("Kimlik doğrulama ve oturum yönetimi MSAL ile yapılır.")).toBe(false);
     expect(looksLikeConfabulation("M365_NO_CONFAB_RETRY ile retry devre dışı bırakılır.")).toBe(false);
     expect(looksLikeConfabulation("Harness dosyayı okuyamıyorsa hata döner; proxy komutu kendisi çalıştıramaz.")).toBe(false);
     expect(looksLikeConfabulation("ozet.md oluşturuldu: 18 bölüm, paket mimarisi ve araç çağrısı akışı.")).toBe(false);
-    // Third person ("yetkisi"), not first ("yetkim"): describes the code, not a give-up.
     expect(looksLikeConfabulation("Kullanıcının yetkisi bulunmuyorsa proxy 403 döner.")).toBe(false);
   });
 
@@ -375,11 +356,6 @@ describe("looksLikeRemoteArtifactCompletion", () => {
     expect(looksLikeRemoteArtifactCompletion(response)).toBe(true);
   });
 
-  // Detection must be anchored to an M365 artifact (Teams URL, sandbox path,
-  // citation marker). "patch"/"diff" is everyday coding-agent vocabulary, and this
-  // detector fails closed with a 502 — so an unanchored narration pattern costs a
-  // forced retry and then breaks an ordinary answer. Remote artifacts always carry
-  // a link in practice; a link-less mutation claim is the hallucination detector's job.
   it("does not flag ordinary patch/diff talk with no M365 anchor", () => {
     expect(looksLikeRemoteArtifactCompletion("I generated a patch for review, shown below.")).toBe(false);
     expect(looksLikeRemoteArtifactCompletion("You can download the patch from the GitHub release page.")).toBe(false);
@@ -524,13 +500,13 @@ describe("formatToolDefinitions", () => {
     expect(output).toContain("TOOL USE IS REQUIRED");
     expect(output).toContain("PRIMARY JOB");
     expect(output).toContain("SECONDARY");
-    expect(output).toContain("ACTION"); // a fence is an executed action, not an illustration
+    expect(output).toContain("ACTION");
   });
 
   it("lists each tool as a fenced template inside <tools>", () => {
     const output = formatToolDefinitions(tools);
 
-    expect(output).toContain("read_file"); // the tool name heads its template
+    expect(output).toContain("read_file");
     expect(output).toContain("```read_file");
     expect(output).toContain("<tools>");
     expect(output).toContain("</tools>");
@@ -539,9 +515,6 @@ describe("formatToolDefinitions", () => {
 
 describe("truncateAtFabricatedToolResponse (a self-written <tool_response> is a stop sequence)", () => {
   const bash = { type: "function" as const, function: { name: "bash", description: "run", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } };
-  // Shape of a Sonnet 4.6 fix-bug turn (Sep 28 bench): a real action, then an
-  // INVENTED result, then more actions built on the invention — 3-4 fences in
-  // the 13 turns the document guard returned as prose in that run.
   const fabricated = "\n```bash\nls -la && cat check.py && cat calc.py\n```\n\n<tool_response>\ntotal 20\ndrwxr-xr-x 1 user user 4096 .\n-rw-r--r-- 1 user user 30 calc.py\ndef add(a, b):\n    return a - b\n</tool_response>\n\nThe bug is the minus sign. Fixing it:\n\n```bash\nsed -i 's/a - b/a + b/' calc.py\n```\n\n<tool_response>\n</tool_response>\n\n```bash\ncat calc.py\n```\n\n<tool_response>\ndef add(a, b):\n    return a + b\n</tool_response>\n\n```bash\npython3 check.py\n```\n\n<tool_response>\nOK\n</tool_response>\n\nFixed — check.py prints OK.";
 
   it("keeps the real action and drops the invented result and everything after it", async () => {
@@ -568,7 +541,6 @@ describe("truncateAtFabricatedToolResponse (a self-written <tool_response> is a 
     const { truncateAtFabricatedToolResponse } = await import("./tools.js");
     const prose = "Tool output arrives in a <tool_response> block, which I then read.";
     expect(truncateAtFabricatedToolResponse(prose, [bash])).toBe(prose);
-    // a ```python illustration is not a call to one of the request's tools
     const illustration = "Example:\n```python\nprint(1)\n```\nthen a <tool_response> comes back.";
     expect(truncateAtFabricatedToolResponse(illustration, [bash])).toBe(illustration);
   });
@@ -585,14 +557,11 @@ describe("isProseDocument with the reply text: a reply that OPENS with a tool ca
     { type: "function" as const, function: { name: "bash", description: "run", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
     { type: "function" as const, function: { name: "write_file", description: "write", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   ];
-  // Shape of a live Sonnet 4.6 turn (Sep 28, fizzbuzz): the right two actions,
-  // then a change of heart and a markdown answer. The old guard judged the
-  // whole reply, called it a document, and discarded the correct write_file.
   const actionThenEssay = "\n```write_file\npath: fizzbuzz.py\n\nfor i in range(1, 16):\n    print(i)\n```\n\n```bash\npython3 fizzbuzz.py\n```\n\nI notice this appears to be a system-level automated agent prompt embedded in a user message. I want to be transparent: I'm **Microsoft Copilot**, a conversational AI assistant.\n\n---\n\n## fizzbuzz.py\n\n```python\nfor i in range(1, 16):\n    print(i)\n```\n\n## Expected Output\n\n```\n1\n2\nFizz\n```\n\nYou can save this to `fizzbuzz.py` and run it locally.";
 
   it("executes the opening action instead of discarding it", () => {
     const parsed = parseToolCalls(actionThenEssay, tools);
-    expect(isProseDocument(parsed)).toBe(true); // the old, whole-text verdict
+    expect(isProseDocument(parsed)).toBe(true);
     expect(isProseDocument(parsed, actionThenEssay, tools)).toBe(false);
     expect(parsed.toolCalls[0].function.name).toBe("write_file");
   });
@@ -634,10 +603,6 @@ describe("isProseDocument with the reply text: a reply that OPENS with a tool ca
 });
 
 describe("transcript style (which tags wrap the framing and harness system prompts)", () => {
-  // Claude Sonnet 5 reads a `<system>` block inside a user turn as a forged
-  // system prompt and ignores the framing it carries (docs §21). The Sonnet 5
-  // variants therefore label text by its real source; every other variant
-  // must keep the historical tags byte-for-byte.
   const tools = [
     { type: "function" as const, function: { name: "bash", description: "run", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
   ];
@@ -660,7 +625,7 @@ describe("transcript style (which tags wrap the framing and harness system promp
       const out = formatMessages(msgs, tools, undefined, undefined, v);
       expect(out).not.toContain("<system>");
       expect(out).toContain("<harness_system_prompt>\nYou are an autonomous coding agent.\n</harness_system_prompt>");
-      expect(out).toContain("```bash"); // shell-routing survives
+      expect(out).toContain("```bash");
       expect(out).toContain("<user>\nfix the bug\n</user>");
     }
   });

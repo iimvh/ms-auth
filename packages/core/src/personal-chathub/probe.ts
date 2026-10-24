@@ -6,11 +6,6 @@ import { buildPersonalChathubUrl, buildPersonalWebSocketHeaders, personalTurnPar
 const RS = "\x1E";
 const log = createLogger("session");
 
-/** The login-time capability probe (spec §10.1): one live turn per candidate
- *  model over the captured connection, "reply with the single word ok".
- *  Returns the first model that produced bot text, or the last candidate with
- *  `ok: false`. Live service only — no unit test; the CLI's probe dep routes
- *  here (Task 3). */
 export async function probePersonalCapture(
   capture: PersonalCapture,
   models: string[],
@@ -43,9 +38,6 @@ async function probeModel(capture: PersonalCapture, model: string): Promise<bool
     const timer = setTimeout(() => done(false), PROBE_TIMEOUT_MS);
     let handshakeDone = false;
 
-    // The server waits for OUR handshake before it says anything; sending it only
-    // on the first inbound message deadlocks (F104 — observed as a silent 16 s
-    // probe timeout while the same socket answered fine with an on-open handshake).
     ws.on("open", () => ws.send(JSON.stringify({ protocol: "json", version: 1 }) + RS));
     ws.on("error", (err) => {
       log.debug(`probe error for ${model}: ${err.message}`);
@@ -94,10 +86,6 @@ async function probeModel(capture: PersonalCapture, model: string): Promise<bool
                   text: "reply with the single word ok",
                   entityType: 0,
                 },
-                // The capability probe only ever runs against a personal capture,
-                // and the consumer backend serves the default Copilot model only:
-                // a Claude_Sonnet tone answers InternalError on an otherwise
-                // identical turn (F108). The real client sends "Magic" capitalised.
                 tone: "Magic",
               }],
               invocationId: "0",

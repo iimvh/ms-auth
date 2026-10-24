@@ -8,8 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MessageUpdate } from "./schemas.js";
 
-/** Replay a sequence of raw M365 frames (deltas as {d}, snapshots as {s}) through
- *  foldStreamText and collect what would be streamed + the final buffered answer. */
 function replay(frames: Array<{ d: string } | { s: string }>) {
   let answer = "";
   const emitted: string[] = [];
@@ -30,7 +28,6 @@ describe("foldStreamText", () => {
   });
 
   it("recovers the head token when it arrives only as a snapshot (the live bug)", () => {
-    // M365 delivered "alpha" as a full-text snapshot, then token deltas for the rest.
     const r = replay([
       { s: "alpha" },
       { d: "\nbeta" },
@@ -47,8 +44,6 @@ describe("foldStreamText", () => {
   });
 
   it("emits the extending tail of a snapshot exactly once (no duplication)", () => {
-    // Deltas gave "Hello wor"; a final snapshot "Hello world" EXTENDS it, so only the
-    // "ld" tail is emitted — never the whole snapshot on top of the deltas.
     const r = replay([{ d: "Hello " }, { d: "wor" }, { s: "Hello world" }]);
     expect(r.emitted).toEqual(["Hello ", "wor", "ld"]);
     expect(r.streamed).toBe("Hello world");
@@ -62,18 +57,14 @@ describe("foldStreamText", () => {
   });
 
   it("adopts a divergent longer snapshot as authoritative but does not stream it", () => {
-    // Deltas streamed "xy"; a later snapshot reveals a different, longer head. We keep
-    // the snapshot for the buffered result but must NOT stream it (can't unsend "xy").
     const r = replay([{ d: "xy" }, { s: "ZZZxy extra" }]);
     expect(r.streamed).toBe("xy");
     expect(r.answer).toBe("ZZZxy extra");
-    expect(r.answer.startsWith(r.streamed)).toBe(false); // divergence recorded, not streamed
+    expect(r.answer.startsWith(r.streamed)).toBe(false);
   });
 });
 
 describe("GraphicArt image frame parsing (§14)", () => {
-  // The exact shape captured from a live GUI image turn — the fields zod used to
-  // strip. If BotMessage is ever re-tightened, this fails and the image is lost.
   const graphicArtFrame = {
     messages: [
       {
@@ -155,13 +146,12 @@ describe("Chathub WebSocket headers", () => {
 
 describe("TurnTextComposer (multi-message turns)", () => {
   type F = { cursor?: string } & ({ d: string } | { s: string; id: string });
-  /** Replay frames through the composer AND the streaming fold, like session.ts. */
   function compose(frames: F[]) {
     const c = new TurnTextComposer();
     let answer = "";
     let streamed = "";
     for (const f of frames) {
-      if (f.cursor) c.cursor(cursorMessageId(f.cursor)!); // as session.ts does
+      if (f.cursor) c.cursor(cursorMessageId(f.cursor)!);
       if ("d" in f) c.delta(f.d);
       else c.snapshot(f.id, f.s);
       const r = foldStreamText(answer, c.text);
@@ -173,9 +163,6 @@ describe("TurnTextComposer (multi-message turns)", () => {
   const cur = (id: string) => `$['${id}'].adaptiveCards[0].body[0].text`;
 
   it("keeps the head of a second message — the live turn that lost a tool fence", () => {
-    // Verbatim shape of the Sep 28 Sonnet 4.6 find-needle turn: narration in one
-    // message, the ```bash fence in the next. The old single-string fold dropped
-    // the second message's head snapshot "```" and produced "…SECRET_CODE.bash\ngrep".
     const r = compose([
       { cursor: cur("m1"), s: "Let", id: "m1" },
       { d: " me look" }, { d: " through" }, { d: " the files" }, { d: " in the notes/" },
@@ -189,7 +176,7 @@ describe("TurnTextComposer (multi-message turns)", () => {
       'Let me look through the files in the notes/ directory to find the SECRET_CODE.\n\n```bash\ngrep -r "^SECRET_CODE=" notes/\n```',
     );
     expect(r.answer).toBe(r.text);
-    expect(r.streamed).toBe(r.text); // prefix-safe: everything streamed, nothing duplicated
+    expect(r.streamed).toBe(r.text);
   });
 
   it("is byte-identical to the old fold for a single-message turn", () => {
@@ -199,8 +186,6 @@ describe("TurnTextComposer (multi-message turns)", () => {
   });
 
   it("routes deltas by cursor, not by whichever snapshot arrived last", () => {
-    // A late final snapshot of message 1 lands after message 2's cursor; the
-    // deltas that follow still belong to message 2.
     const r = compose([
       { cursor: cur("m1"), s: "one", id: "m1" },
       { cursor: cur("m2"), s: "two", id: "m2" },

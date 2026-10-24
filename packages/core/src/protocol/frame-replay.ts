@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod/v4";
 
-/** One line of a `M365_DUMP_FRAMES=1` turn dump: the shape `dumpFrame` in
- *  `session.ts` appends to `<FRAME_DIR>/<requestId>.ndjson`, plus the optional
- *  `synthetic` note a hand-written fixture carries on every line. */
 export const FrameDumpLine = z.object({
   t: z.number(),
   dir: z.enum(["recv", "send"]),
@@ -16,23 +13,15 @@ export type FrameDumpLine = z.infer<typeof FrameDumpLine>;
 export class FrameFixtureError extends Error {}
 
 export interface ReplayMessage {
-  /** Milliseconds after the dump's first frame. */
   at: number;
-  /** The 1-based dump line this message came from. */
   line: number;
   data: Buffer;
 }
 
 export interface ReplayFixture {
-  /** Every parsed dump line, in dump order — both directions. */
   lines: FrameDumpLine[];
-  /** The frames the proxy RECEIVED, one SignalR message each, in the order the
-   *  live turn saw them. This is what a replay feeds the socket. */
   received: ReplayMessage[];
-  /** The note every line carries in its `synthetic` field, or null on a
-   *  recorded dump. */
   synthetic: string | null;
-  /** The dump the fixture was loaded from. */
   file: string;
 }
 
@@ -60,10 +49,6 @@ function syntheticNote(lines: FrameDumpLine[], file: string): string | null {
   throw new FrameFixtureError(`${file}: ${noted.length} of ${lines.length} lines carry a synthetic note — a fixture is all synthetic or all recorded`);
 }
 
-/** Load a turn dump and rebuild what the socket delivered during that turn.
- *  A dump writes one line per received frame, and the live socket delivered
- *  each of those as one message; the dump's relative times are kept so a
- *  replay can pace the turn the way the recording arrived. */
 export function loadFrameFixture(text: string, file = "<fixture>"): ReplayFixture {
   const lines = dumpLines(text, file);
   const first = lines[0];

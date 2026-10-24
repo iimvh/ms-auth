@@ -48,7 +48,6 @@ describe("m365-personal cli", () => {
     const code = await runPersonalCli(["login"], { store: d.store, capture: d.capture, probe: d.probe, out: d.outFn, now: d.now });
     expect(code).not.toBe(0);
     expect(d.out.join("\n")).toContain("does not serve this account");
-    // the capture is still recorded: a working probe model may exist after a re-login
     expect(d.store.read()?.scenario).toBe("OfficeWebPaidConsumerCopilot");
   });
 
@@ -67,9 +66,6 @@ describe("m365-personal cli", () => {
   });
 
   it("logout refuses a profileDir that is the data dir itself", async () => {
-    // `logout` is an rm -rf of profileDir, and a hand-edited registry entry can
-    // point it at the data dir, which would take secrets.json and every other
-    // account with it.
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
     useMockRegistry([{ id: "default", hasSession: true }]);
     try {
@@ -112,7 +108,7 @@ describe("--account", () => {
     });
     expect(code).toBe(0);
     expect(workStore.read()?.scenario).toBe("OfficeWebPaidConsumerCopilot");
-    expect(defaultStore.read()).toEqual(before); // the active (default) account untouched
+    expect(defaultStore.read()).toEqual(before);
     expect(out.join("\n")).toContain('account: work');
     clearMockRegistry();
     delete process.env.M365_ACCOUNT_HOME;

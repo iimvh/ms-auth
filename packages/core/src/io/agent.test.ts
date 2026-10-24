@@ -8,7 +8,6 @@ describe("environmentUrlFromName", () => {
     );
   });
 
-  // Regression: the old hardcoded `.df.` only worked for IDs ending in "df".
   it("uses the real trailing chars, not a hardcoded `.df.`", () => {
     expect(environmentUrlFromName("Default-906AEFE9-76A7-4F65-B82D-5EC20775D5A1")).toBe(
       "https://default906aefe976a74f65b82d5ec20775d5.a1.environment.api.powerplatform.com",

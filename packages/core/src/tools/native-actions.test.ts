@@ -6,8 +6,6 @@ import {
   ACTION_ALLOWED_MESSAGE_TYPES,
 } from "./native-actions.js";
 
-// A confirmation-trigger frame shaped like the decompiled client's, carrying an
-// adaptive card whose Allow button holds {actionId, confirmationOption}.
 const triggerMsg = {
   author: "bot",
   messageType: "ConfirmationCard",
@@ -32,7 +30,7 @@ describe("parseActionConfirmation", () => {
     expect(c!.actionId).toBe("act_123");
     expect(c!.sourceRequestId).toBe("req_abc");
     expect(c!.isConsequential).toBe(false);
-    expect(c!.confirmationOption).toBe("confirm"); // affirmative, not "decline"
+    expect(c!.confirmationOption).toBe("confirm");
   });
 
   it("ignores ordinary bot chat messages", () => {
@@ -74,9 +72,7 @@ describe("buildResumeInvokeAction", () => {
     expect(msg.actionId).toBe("act_123");
     expect(msg.sourceRequestId).toBe("req_abc");
     expect(msg.author).toBe("user");
-    // text = the affirmative button's TITLE ("Allow"), per the real client's y()/v().
     expect(msg.text).toBe("Allow");
-    // confirmationOption is NOT a top-level field of the resume message.
     expect("confirmationOption" in msg).toBe(false);
     expect(Array.isArray(msg.invokeActionMessages)).toBe(true);
     expect((msg.invokeActionMessages as unknown[])[0]).toBe(triggerMsg);
@@ -92,7 +88,7 @@ describe("buildResumeInvokeAction", () => {
 
 describe("shouldAutoConfirm", () => {
   it("auto-confirms non-consequential (read-only) actions", () => {
-    const c = parseActionConfirmation(triggerMsg)!; // isConsequential: false
+    const c = parseActionConfirmation(triggerMsg)!;
     expect(shouldAutoConfirm(c)).toBe(true);
   });
 

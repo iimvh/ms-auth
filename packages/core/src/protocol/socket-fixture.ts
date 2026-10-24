@@ -41,8 +41,6 @@ export function botText(text: string): Buffer {
   return Buffer.from(JSON.stringify({ type: 1, target: "update", arguments: [{ messages: [{ author: "bot", text }] }] }) + RS);
 }
 
-/** Feeds a loaded fixture's frames to the turn, one socket message each, in the
- *  dump's order — the path `handshake()` + `botText()` only approximated. */
 export function replayFeed(frames: ReadonlyArray<{ data: Buffer }>): () => void {
   return () => {
     for (const frame of frames) recording.emit("message", frame.data);

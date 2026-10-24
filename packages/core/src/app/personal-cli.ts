@@ -26,9 +26,7 @@ usage: m365-personal <command> [--account <id>] [--json]
 
 export interface CliDeps {
   store: PersonalStore;
-  /** The account acted on; null = the builtin layout (one account, no registry). */
   accountId: string | null;
-  /** Where that account's Chrome profile lives (logout deletes it). */
   profileDir: string;
   capture: (headed: boolean) => Promise<PersonalCapture>;
   probe: (capture: PersonalCapture) => Promise<PersonalRecord["probe"]>;
@@ -36,7 +34,6 @@ export interface CliDeps {
   now: () => number;
 }
 
-/** Candidate ladder for the login-time capability probe (spec §10.1). */
 function probeModels(): string[] {
   return (process.env.M365_PERSONAL_PROBE_MODELS ?? "claude-sonnet")
     .split(",")
@@ -61,7 +58,6 @@ function defaultDeps(accountId: string | null): CliDeps {
   };
 }
 
-/** Everything except the bearer token — `accessToken` never reaches stdout. */
 function publicRecord(record: PersonalRecord) {
   const { accessToken, ...rest } = record;
   void accessToken;
@@ -89,18 +85,10 @@ function profileExists(profileDir: string): boolean {
 function usageError(why: string, out?: (line: string) => void): number {
   console.error(why);
   console.error(USAGE);
-  // Also through `out`, so a caller that shows the CLI's own output (a wrapper,
-  // a test) sees the reason rather than an exit code alone.
   out?.(why);
   return 2;
 }
 
-/**
- * Pull `--account <id>` out of the flags. Anything else is unknown. A missing
- * value, an unusable id, or an id the registry does not hold is a usage error
- * (exit 2) raised BEFORE any capture or write — naming the account must never
- * be able to fall back to the active one.
- */
 function parseFlags(flags: string[], known: string[]): { ok: true; accountId: string | null } | { ok: false; why: string } {
   let accountId: string | null = null;
   for (let i = 0; i < flags.length; i++) {
@@ -129,14 +117,9 @@ function parseFlags(flags: string[], known: string[]): { ok: true; accountId: st
   return { ok: true, accountId };
 }
 
-/** Run the `m365-personal` subcommand. Returns the process exit code. */
 export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): Promise<number> {
   const [command, ...flags] = argv;
   const json = flags.includes("--json");
-  // --account is resolved BEFORE anything is captured or written: naming an
-  // account must never silently fall back to the active one (§7.9).
-  // Only the FIRST --json is dropped, so `--account --json` cannot leave the
-  // flag's own name to be read as an account id.
   const jsonAt = flags.indexOf("--json");
   const flagArgs = jsonAt === -1 ? flags : [...flags.slice(0, jsonAt), ...flags.slice(jsonAt + 1)];
   const parsed = parseFlags(flagArgs, []);
@@ -174,9 +157,6 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
         }
         if (json) d.out(JSON.stringify(publicRecord(record)));
         if (probe && !probe.ok) {
-          // Stop condition (spec §10.1): never report success for a capture the
-          // proxy cannot use. The record is still written — a login that gets an
-          // answer later re-probes and replaces it.
           d.out("the structured scenario does not serve this account: no candidate model answered the capability probe");
           return 3;
         }
@@ -192,8 +172,6 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
     case "status": {
       const state = d.store.inspect();
       if (!state.ok) {
-        // "Nothing stored" and "what is stored is broken" need different repairs;
-        // reporting both as the former sent the operator to `login` blind.
         if (state.problem === "absent") {
           d.out(`no personal session stored for ${who}.`);
           d.out(`run: ${loginCommand}`);
@@ -216,10 +194,6 @@ export async function runPersonalCli(argv: string[], deps?: Partial<CliDeps>): P
       return 0;
     }
     case "logout": {
-      // Deleting the profile is `rm -rf`, and with a registry the profile dir
-      // comes from the file: a hand-edited entry pointing at the data dir
-      // itself would take secrets.json and every other account with it. The
-      // same guard as removeAccount, and the same refusal.
       const profile = resolve(d.profileDir);
       const config = resolve(configDir());
       if (profile === config || profile === resolve(accountsDir()) || profile === dirname(config)) {

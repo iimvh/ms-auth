@@ -41,9 +41,6 @@ export class PersonalCaptureError extends Error {
       missing_param: detail ?? "the captured websocket URL is missing a required parameter",
       capture_failed: detail ?? "the browser capture failed before a usable session was read",
     };
-    // The detail is the diagnosis (e.g. "the browser landed on a sign-in page");
-    // swallowing it leaves the operator with "not a Chathub socket" for a dead
-    // profile. missing_param's detail IS its message.
     super(reason === "missing_param" ? what.missing_param : detail ? `${what[reason]}: ${detail}` : what[reason]);
     this.name = "PersonalCaptureError";
   }
@@ -52,7 +49,6 @@ export class PersonalCaptureError extends Error {
 const CHATHUB_HOST = "substrate.office.com";
 const CHATHUB_PATH_PREFIX = "/m365Copilot/Chathub/";
 
-/** Expiry of a captured access token, from its `exp` claim, in ms. */
 export function decodeJwtExpiresAt(token: string): number {
   const parts = token.split(".");
   if (parts.length !== 3) {
@@ -71,9 +67,6 @@ export function decodeJwtExpiresAt(token: string): number {
   }
 }
 
-/** Which URL params to read and whether the value is JSON-quoted by the
- *  client (`%22officeweb%22` → `officeweb`). `product` is optional: the paid
- *  work socket sends it, the free consumer socket does not (F97). */
 const STRING_PARAMS: readonly string[] = [
   "scenario",
   "variants",
@@ -83,10 +76,6 @@ const STRING_PARAMS: readonly string[] = [
 const OPTIONAL_STRING_PARAMS: readonly string[] = ["product"];
 const JSON_PARAMS: readonly string[] = ["source"];
 
-/** Rebuild a `PersonalCapture` from the real client's Chathub socket: the URL
- *  carries the connection params, the first sent `type:4, target:"chat"`
- *  invocation carries `optionsSets`/`allowedMessageTypes`, the JWT carries
- *  `exp` (spec §6.1). Invoked by the browser driver in Task 3. */
 export function parsePersonalCapture(wsUrl: string, sentFrames: string[]): PersonalCapture {
   const url = new URL(wsUrl);
   if (url.host !== CHATHUB_HOST || !url.pathname.startsWith(CHATHUB_PATH_PREFIX)) {
@@ -102,15 +91,6 @@ export function parsePersonalCapture(wsUrl: string, sentFrames: string[]): Perso
   try {
     expiresAt = decodeJwtExpiresAt(accessToken);
   } catch (err) {
-    // The consumer (free-tier) socket's token is an encrypted JWE (alg=dir,
-    // A256CBC-HS512, zip=DEF) — its claims are not readable without Microsoft's
-    // key (F98). Treat a non-JWT as opaque and estimate a TTL; the staleness
-    // policy then mints early, and a wrong estimate only costs one mint.
-    //
-    // The default 1 h is NOT a measurement: a captured token kept serving turns
-    // at least 77 minutes after capture (measured 2026-10-23), and the page's
-    // own MSAL credential for the same account lives 8 h. The socket token's
-    // real lifetime is unknown — see docs/personal-mint-design.md.
     if (!(err instanceof PersonalCaptureError) || err.reason !== "not_a_jwt") throw err;
     const ttl = Number(process.env.M365_PERSONAL_TOKEN_TTL_MS ?? 3_600_000);
     if (!Number.isFinite(ttl) || ttl <= 0) throw err;
@@ -163,8 +143,6 @@ export function parsePersonalCapture(wsUrl: string, sentFrames: string[]): Perso
 
 const RS = "\x1e";
 
-/** All visible text across the page and its frames (Cloudflare's challenge lives
- *  in an out-of-process iframe whose text the top document never shows). */
 async function pageText(page: {
   locator(sel: string): { innerText(): Promise<string> };
   frames(): Array<{ locator(sel: string): { innerText(): Promise<string> } }>;
@@ -174,26 +152,15 @@ async function pageText(page: {
     try {
       parts.push(await frame.locator("body").innerText());
     } catch {
-      // detached/frame navigated away
     }
   }
   return parts.join(String.fromCharCode(10));
 }
 
-/** Whether the page is asking for Microsoft's human verification. Reading the
- *  sentence is all this does — nothing tries to solve or bypass the challenge. */
 export function bodyNeedsVerification(text: string): boolean {
-  // F100/F101: the gate surfaced as "Verification required to continue." on one
-  // run and as a "Security check required" dialog followed by "Your request
-  // couldn't be completed. Refresh to try again." on another — all three mean a
-  // human has to act in the window.
   return /verification required to continue|verify you are human|security check required|couldn.t be completed\. refresh to try again/i.test(text);
 }
 
-/** Whether the sent frames include the chat invocation (type:4, target:"chat").
- *  A socket that has only opened and exchanged the SignalR handshake is NOT
- *  enough: the app opens the Chathub socket on page load and only sends the
- *  invocation when a message is actually sent. */
 export function hasChatFrame(sentFrames: string[]): boolean {
   try {
     firstChatArgument(sentFrames);
@@ -217,11 +184,6 @@ function firstChatArgument(sentFrames: string[]): Record<string, unknown> | null
   throw new PersonalCaptureError("no_chat_frame");
 }
 
-/** One WS frame can carry several SignalR messages: normally separated by the
- *  record separator (), but the consumer client also concatenates them
- *  with no separator at all (F102 — a `type:4` chat invocation followed by a
- *  `Metrics` message, so a whole-frame JSON.parse fails halfway). Split on the
- *  separator, then on JSON object boundaries, and keep what parses. */
 export function splitMessages(rawFrame: string): unknown[] {
   const messages: unknown[] = [];
   for (const chunk of rawFrame.split(RS)) {
@@ -229,15 +191,12 @@ export function splitMessages(rawFrame: string): unknown[] {
       try {
         messages.push(JSON.parse(piece));
       } catch {
-        // not JSON (e.g. the Socket.IO-style "5:::" frames) — not ours
       }
     }
   }
   return messages;
 }
 
-/** Text that is one or more concatenated JSON objects → each object's source
- *  text. A string-aware brace counter: `}` inside a JSON string never closes. */
 function splitConcatenatedJson(text: string): string[] {
   const pieces: string[] = [];
   let depth = 0;
@@ -273,9 +232,6 @@ function stringArray(value: unknown): string[] {
   return [];
 }
 
-/** The message used to force a Chathub socket open when the app opens none on
- *  page load. Whatever the model replies, it is not recorded — only the socket
- *  the reply travelled on is. */
 const PROMPT_TO_TRIGGER_SOCKET = "hi";
 
 function findChromium(): string | undefined {
@@ -287,7 +243,6 @@ function findChromium(): string | undefined {
         .trim();
       if (found) return found;
     } catch {
-      // not on PATH, try next
     }
   }
   return undefined;
@@ -299,14 +254,10 @@ const LOGIN_USER_AGENT =
 
 const CHAT_HOME = "https://m365.cloud.microsoft/chat";
 
-/** A URL that is (part of) the AAD sign-in flow rather than the chat app. */
 export function isLoginUrl(url: string): boolean {
   return url.includes("login.microsoftonline.com") || url.includes("/login");
 }
 
-/** Stored email/password/TOTP when the operator has them — the same
- *  `secrets.json` the enterprise automated login uses. Unset/absent/short is
- *  simply "no automation, wait for a human". */
 async function storedSecrets(deps: CaptureDeps): Promise<SignInCredentials | null> {
   if (process.env.M365_PERSONAL_AUTOMATED_LOGIN === "0") return null;
   try {
@@ -316,15 +267,8 @@ async function storedSecrets(deps: CaptureDeps): Promise<SignInCredentials | nul
   }
 }
 
-/** A WS payload as text: text frames arrive as strings; some clients send the
- *  same JSON as binary frames — decode UTF-8 and keep it if it reads like a
- *  JSON frame. Playwright's payload type has grown over versions (string,
- *  Buffer, Uint8Array, plain object); none of this is worth a crash: the
- *  handler catches everything and ignores what it cannot read. */
 export function frameText(data: unknown): string | null {
   try {
-    // Playwright >=1.5x hands `framesent` an object `{ payload }`; older code
-    // paths hand the payload itself. Accept both.
     const inner =
       data && typeof data === "object" && "payload" in (data as Record<string, unknown>)
         ? (data as { payload: unknown }).payload
@@ -343,16 +287,10 @@ function maybeJson(bytes: Uint8Array): string | null {
   return text.startsWith("{") ? text : null;
 }
 
-/** Drive the real m365.cloud.microsoft/chat in a persistent profile and
- *  capture the exact Chathub connection the app opens (spec §6.1). Headless
- *  for a mint, headed for the once-a-day `login`. This is operator-facing
- *  code — no unit test; the parse it feeds is tested in Task 2. */
 export async function capturePersonalSession(opts: {
   headed: boolean;
   profileDir: string;
   waitMs?: number;
-  /** Operator-facing progress lines (e.g. "sign in in the opened window").
-   *  The CLI wires it to stdout; a mint leaves it unset (debug file only). */
   onEvent?: (line: string) => void;
   deps?: CaptureDeps;
 }): Promise<PersonalCapture> {  const waitMs = opts.waitMs ?? Number(process.env.M365_PERSONAL_MINT_WAIT_MS ?? 10_000);
@@ -364,7 +302,6 @@ export async function capturePersonalSession(opts: {
   // set, the operator starts a REAL Chrome (`--remote-debugging-port=<port>
   // --user-data-dir=<profile dir>`) and we attach over CDP instead — nothing to
   // launch, no automation flag (F101). The account's own CDP target is what
-  // keeps a capture from ever landing in another account's profile.
   const resolved = resolveAccount();
   const cdpUrl = resolved.id !== null || process.env.M365_PERSONAL_CDP_URL ? resolved.cdpUrl : null;
   const attached = cdpUrl ? await chromium.connectOverCDP(cdpUrl) : null;
@@ -407,23 +344,12 @@ export async function capturePersonalSession(opts: {
 
     await page.goto(CHAT_HOME, { waitUntil: "domcontentloaded" });
     log.debug(`landing page: ${page.url()}`);
-    // A consumer sign-in always transits an AAD authorize URL (the /common/
-    // oauth2 endpoint) on the way to the chat app — even with a valid saved
-    // session, it auto-continues there in a couple of seconds. Treat
-    // "landing on a login URL" as a state to out-wait, not a fact: a signed-in
-    // profile leaves it quickly, an unsigned one stays. Headed enrollment then
-    // keeps waiting for the operator (up to loginWaitMs); a headless mint
-    // gives the silent SSO only a bounded transit window (transitMs) before
-    // declaring the profile dead (spec §6.3).
     if (isLoginUrl(page.url()) && opts.headed) {
       const loginWaitMs = Number(process.env.M365_PERSONAL_LOGIN_WAIT_MS ?? 300_000);
       opts.onEvent?.(
         `the browser opened on the Microsoft sign-in page — complete the sign-in there; waiting up to ${Math.round(loginWaitMs / 1000)} s`,
       );
       log.debug(`headed login waits for interactive sign-in, loginWaitMs=${loginWaitMs}`);
-      // AGENTS auth order: silent → automated (secrets.json) → ask a human. The
-      // visible window stays open, so both paths race and whichever finishes first
-      // wins; automation needs M365_PERSONAL_AUTOMATED_LOGIN=0 to opt out.
       const deps = opts.deps ?? hostDeps.current;
       const creds = deps ? await storedSecrets(deps) : null;
       if (creds && deps) {
@@ -466,11 +392,6 @@ export async function capturePersonalSession(opts: {
     const waitForSocket = async (ms: number) => {
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) {
-        // The socket alone is not the prize: the capture needs the chat
-        // invocation frame (optionsSets/allowedMessageTypes). A page-load
-        // Chathub socket that only exchanges the SignalR handshake leaves
-        // firstChatArgument with nothing (F99), so typed-prompt forcing must
-        // still happen in that case.
         const socket = sockets.find((s) => isChathub(s.url) && hasChatFrame(s.frames));
         if (socket) return socket;
         await page.waitForTimeout(250);
@@ -478,19 +399,13 @@ export async function capturePersonalSession(opts: {
       return null;
     };
 
-    // Page-load capture first (spec §10.3): typing anything costs a thread.
     let socket = await waitForSocket(waitMs);
     if (!socket) {
       log.debug(`no chat invocation frame after ${waitMs} ms; typing a short message to force one`);
-      // The consumer page's editor is a contenteditable span; typing through the
-      // keyboard (not fill) is what lets its editor state and the Send button
-      // react (F100). The Send button is preferred over Enter for the same reason.
       const composer = page
         .locator('#m365-chat-editor-target-element, textarea, [role="textbox"], [contenteditable="true"]')
         .first();
       await composer.click({ timeout: 30_000 });
-      // Clear any saved draft first: the page restores unsent text across runs,
-      // and typing on top of it produced "kkkhi" instead of "hi" (F101).
       await page.keyboard.press("Control+A");
       await page.keyboard.press("Backspace");
       await page.keyboard.type(PROMPT_TO_TRIGGER_SOCKET, { delay: 40 });
@@ -499,14 +414,6 @@ export async function capturePersonalSession(opts: {
       else await page.keyboard.press("Enter");
       socket = await waitForSocket(waitMs);
       if (!socket) {
-        // Microsoft gates a free consumer conversation behind a one-time human
-        // verification ("Verification required to continue.") — the message is
-        // never sent, so no invocation frame can appear (F100). Wait for the
-        // operator to clear it in this window, then send again. Nothing here
-        // solves or bypasses the challenge.
-        // The gate dialog can lag the send by a few seconds; give it a beat.
-        // Cloudflare renders its challenge in a frame of its own, so read every
-        // frame, not just the top document.
         let body = "";
         for (let i = 0; i < 8; i++) {
           body = await pageText(page);
@@ -559,7 +466,6 @@ export async function capturePersonalSession(opts: {
     );
     return capture;
   } finally {
-    // An attached Chrome belongs to the operator: disconnect, never close it.
     if (attached) await attached.close().catch(() => {});
     else await context.close().catch((err) => log.debug("closing the capture browser failed:", err));
   }

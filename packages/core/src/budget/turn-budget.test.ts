@@ -15,10 +15,6 @@ import {
   type BudgetConfig,
 } from "./turn-budget.js";
 
-// The model itself (replay, decide, the window search) is tested in
-// scripts/bench/turn-budget.test.mjs, against the built package. This covers
-// what the proxy adds: reading logs as they grow, and waiting before a turn.
-
 const T0 = Date.parse("2026-10-12T08:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
 const turnLine = (ms: number, n = 0) => `[${iso(ms)}] [INFO] [session] Chat turn ${n}: model=claude-sonnet, isFirst=false, text="x"\n`;
@@ -36,13 +32,10 @@ const cfgFor = (dir: string, over: Partial<BudgetConfig> = {}): BudgetConfig => 
   maxWaitMin: 15, enabled: true, dirs: [dir], ...over,
 });
 
-/** A fake clock whose sleeps advance it. */
 function clock(start = T0) {
   const c = { t: start, slept: [] as number[] };
   return {
     c,
-    // As a proxy without M365_DEBUG: its own turns are counted from memory, and
-    // its real debug log isn't read.
     logged: false,
     now: () => c.t,
     sleep: async (ms: number, signal?: AbortSignal) => { signal?.throwIfAborted(); c.slept.push(ms); c.t += ms; },
@@ -64,7 +57,7 @@ describe("readLogEvents", () => {
   it("holds back a line still being written until its newline arrives", () => {
     const { file } = logDir([turnLine(T0)]);
     const partial = turnLine(T0 + 1000, 1);
-    appendFileSync(file, partial.slice(0, 20)); // the timestamp isn't even complete
+    appendFileSync(file, partial.slice(0, 20));
     expect(readLogEvents(file)).toHaveLength(1);
     appendFileSync(file, partial.slice(20));
     expect(readLogEvents(file).map((e) => e.t)).toEqual([T0, T0 + 1000]);
@@ -111,26 +104,22 @@ describe("awaitTurnBudget", () => {
   });
 
   it("waits on a drained bucket until it holds one turn plus the reserve, re-reading every 15 s", async () => {
-    // 85 turns in the 85 s before T0: the bucket is at ~17, short of 1 + 20.
     const { dir } = logDir(Array.from({ length: 85 }, (_, i) => turnLine(T0 - 85_000 + i * 1000, i)));
     const k = clock();
     const res = await awaitTurnBudget({ cfg: cfgFor(dir), logged: k.logged, now: k.now, sleep: k.sleep });
     expect(k.c.slept.every((ms) => ms <= 15_000)).toBe(true);
-    // ~4 turns short at 1.6/min: about two and a half minutes.
     expect(res.waitedMs).toBeGreaterThan(2 * 60_000);
     expect(res.waitedMs).toBeLessThan(3 * 60_000);
   });
 
   it("counts a turn it let through before it starts, so the next request waits for it", async () => {
-    // At exactly 21 turns: room for one, not two.
     const { dir } = logDir(Array.from({ length: 79 }, (_, i) => turnLine(T0 - 79 + i, i)));
     const k = clock();
     const cfg = cfgFor(dir);
     await awaitTurnBudget({ cfg, logged: k.logged, now: k.now, sleep: k.sleep });
     expect(k.c.slept).toEqual([]);
     await awaitTurnBudget({ cfg, logged: k.logged, now: k.now, sleep: k.sleep });
-    expect(k.c.slept.length).toBeGreaterThan(0); // waited for the first one's turn
-    // The grant is consumed when the turn starts, not counted twice.
+    expect(k.c.slept.length).toBeGreaterThan(0);
     const before = proxyBudgetStatus(k.now(), cfg, false).turns;
     recordTurn(k.now());
     expect(proxyBudgetStatus(k.now(), cfg, false).turns).toBe(before);
@@ -149,7 +138,6 @@ describe("awaitTurnBudget", () => {
   });
 
   it("counts its own turns when it writes no log, and leaves them to the log when it does", async () => {
-    // Years back, so the real debug log `logged` adds holds nothing in the window.
     const at = Date.parse("2020-01-01T00:00:00.000Z");
     const { dir } = logDir();
     const cfg = cfgFor(dir);
@@ -168,7 +156,7 @@ describe("awaitTurnBudget", () => {
     expect(err.reason).toBe("throttle hold");
     expect(Math.round(err.waitMs / 60_000)).toBe(65);
     expect(err.lastThrottle).toBe(T0 - 10 * 60_000);
-    expect(k.c.slept).toEqual([]); // never slept on a wait it would refuse anyway
+    expect(k.c.slept).toEqual([]);
   });
 
   it("sees a throttle this process recorded", async () => {
@@ -189,7 +177,6 @@ describe("awaitTurnBudget", () => {
   });
 
   it("refuses a refill longer than the request may wait, and the limit is the smaller of the two", async () => {
-    // An empty bucket: 21 turns at 1.6/min is ~13 min, inside 15 but not inside 2.
     const { dir } = logDir(Array.from({ length: 100 }, (_, i) => turnLine(T0 - 100 + i, i)));
     const k = clock();
     const err = await awaitTurnBudget({ cfg: cfgFor(dir), maxWaitMs: 2 * 60_000, logged: k.logged, now: k.now, sleep: k.sleep }).catch((e) => e);
@@ -215,10 +202,8 @@ describe("awaitTurnBudget", () => {
 });
 
 describe("awaitTurnBudget's line (#77)", () => {
-  // 85 turns in the 85 s before T0: ~2.3 min to the first turn, ~37 s more to the next.
   const drained = () => logDir(Array.from({ length: 85 }, (_, i) => turnLine(T0 - 85_000 + i * 1000, i)));
 
-  /** A front request whose sleep hangs until `release`, which also moves the clock past its wait. */
   function heldFront(k: ReturnType<typeof clock>, cfg: BudgetConfig) {
     let release!: () => void;
     const gate = new Promise<void>((res) => { release = () => { k.c.t += 10 * 60_000; res(); }; });
@@ -236,7 +221,6 @@ describe("awaitTurnBudget's line (#77)", () => {
   it("counts the time behind another request toward its own wait and limit", async () => {
     const { dir } = drained();
     const cfg = cfgFor(dir);
-    // Both arrive at T0: the clock moves only once the first call has returned its promise.
     const later = (k: ReturnType<typeof clock>) => async (ms: number, signal?: AbortSignal) => { await null; await k.sleep(ms, signal); };
     const k = clock();
     const [a, b] = await Promise.all([
@@ -244,8 +228,7 @@ describe("awaitTurnBudget's line (#77)", () => {
       awaitTurnBudget({ cfg, logged: k.logged, now: k.now, sleep: later(k) }),
     ]);
     expect(Math.round(a.waitedMs / 1000)).toBe(140);
-    expect(Math.round((b.waitedMs - a.waitedMs) / 100) / 10).toBe(37.5); // one more turn's refill, on top of a's wait
-    // 37.5 s from the front fits in 2.75 min; with the 140 s in line it doesn't.
+    expect(Math.round((b.waitedMs - a.waitedMs) / 100) / 10).toBe(37.5);
     resetTurnBudget();
     const k2 = clock();
     const [, err] = await Promise.all([
@@ -269,11 +252,9 @@ describe("awaitTurnBudget's line (#77)", () => {
     const err = await queued;
     expect(err).toBeInstanceOf(TurnBudgetHold);
     expect(err.reason).toBe("refill");
-    // The 429's Retry-After covers both turns: the front's and its own.
     expect(err.waitMs).toBeGreaterThan(2.5 * 60_000);
     front.release();
     expect((await front.done).waitedMs).toBe(10 * 60_000);
-    // Its leaving didn't break the line for the next request.
     expect((await awaitTurnBudget({ cfg, logged: k.logged, now: k.now, sleep: k.sleep })).waitedMs).toBe(0);
   });
 
@@ -287,11 +268,11 @@ describe("awaitTurnBudget's line (#77)", () => {
     const next = awaitTurnBudget({ cfg, logged: k.logged, now: k.now, sleep: k.sleep });
     ac.abort(new Error("client gone"));
     await expect(gone).rejects.toThrow("client gone");
-    expect(await settled(next)).toBe(false); // didn't jump ahead of the front, which is still deciding
+    expect(await settled(next)).toBe(false);
     expect(k.c.slept).toEqual([]);
     front.release();
     expect((await front.done).waitedMs).toBe(10 * 60_000);
-    expect((await next).waitedMs).toBe(10 * 60_000); // decided only once the front had
+    expect((await next).waitedMs).toBe(10 * 60_000);
   });
 });
 
@@ -303,7 +284,7 @@ describe("account-tagged turn events", () => {
       "[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a",
     ].join("\n");
     expect(parseEvents(log, "work")).toHaveLength(2);
-    expect(parseEvents(log)).toHaveLength(1); // untagged lines belong to the builtin layout
+    expect(parseEvents(log)).toHaveLength(1);
   });
 
   it("an untagged log (written before this change) still counts", () => {
@@ -316,14 +297,12 @@ describe("account-tagged turn events", () => {
     expect(parseEvents(log, "other")).toEqual([]);
   });
 
-  // The real line carries the prompt before the tag, and the prompt is the
-  // user's: taking the FIRST `account=` would let it charge another account.
   it("reads the tag as the last token, not one inside the prompt text", () => {
     const spoof = JSON.stringify("please note account=work in the ticket");
     const line = `[2026-10-23T05:00:00.000Z] [INFO] [session] Chat turn 0: model=a, isFirst=true, text=${spoof} account=default`;
     expect(parseEvents(line, "default")).toEqual([expect.objectContaining({ kind: "turn", account: "default" })]);
     expect(parseEvents(line, "work")).toEqual([]);
-    expect(parseEvents(line)).toEqual([]); // and it is not a builtin line either
+    expect(parseEvents(line)).toEqual([]);
   });
 
   it("an untagged line whose text mentions an account is the builtin account's", () => {

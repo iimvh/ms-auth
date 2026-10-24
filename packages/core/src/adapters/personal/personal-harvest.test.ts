@@ -27,7 +27,6 @@ const prior: PersonalCapture = {
   capturedAt: 0,
 };
 
-/** A page handle that reports the socket a harvest should find. */
 function pageThatOpens(socket: HarvestedSocket | null): HarvestedPage & { closed: boolean } {
   const page = {
     closed: false,
@@ -79,7 +78,6 @@ describe("harvestPersonalToken", () => {
   });
 
   it("reports no rotation when the page reused its token — and still spent a turn", async () => {
-    // Seen once (two sends 3 min apart, F111); 5/6 rounds 10 min apart rotated.
     const { promise } = run({ previousToken: "TOKEN" });
     const result = await promise;
     expect(result.rotated).toBe(false);

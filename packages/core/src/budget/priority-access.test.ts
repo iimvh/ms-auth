@@ -11,8 +11,6 @@ import {
   secondsUntilReset,
 } from "./priority-access.js";
 
-// Wednesday 2026-09-16T22:30:00Z — mid-week, late in the UTC day, so a naive
-// local-time implementation would compute the wrong reset.
 const WED = new Date("2026-09-16T22:30:00Z");
 
 const DAILY =
@@ -43,7 +41,7 @@ describe("parsePriorityAccessExhaustion", () => {
   });
 
   it("rolls a Monday-hit weekly cap to the NEXT Monday, not today", () => {
-    const mon = new Date("2026-09-21T09:00:00Z"); // a Monday
+    const mon = new Date("2026-09-21T09:00:00Z");
     const r = parsePriorityAccessExhaustion(WEEKLY, mon)!;
     expect(r.resetsAt.toISOString()).toBe("2026-09-28T00:00:00.000Z");
   });
@@ -79,7 +77,7 @@ describe("parsePriorityAccessExhaustion", () => {
 describe("secondsUntilReset", () => {
   it("counts down to the reset and never returns zero", () => {
     const r = parsePriorityAccessExhaustion(DAILY, WED)!;
-    expect(secondsUntilReset(r, WED)).toBe(90 * 60); // 22:30Z → 00:00Z
+    expect(secondsUntilReset(r, WED)).toBe(90 * 60);
     expect(secondsUntilReset(r, new Date("2026-09-17T00:00:00Z"))).toBe(1);
   });
 });
@@ -107,8 +105,6 @@ describe("couldBePriorityAccessPrefix (stream-head gate)", () => {
   });
 });
 
-// The final item's throttling block of a paid-scenario Opus turn, verbatim
-// (2026-10-05 00:01Z, the first Opus 5.5 turn after the weekly reset; §24 F55).
 const METERING = {
   DeepResearch: { remainingAllowance: 100 },
   ClaudeOpusQuery: { remainingAllowance: 100 },
@@ -130,7 +126,6 @@ describe("parseMetering / meteredAllowance", () => {
   });
 
   it("picks out Sonnet 5.5's allowances, apart from Opus's (§26)", () => {
-    // Read off a Sonnet 5.5 turn on 2026-10-06, after its first turn of the week.
     const m = parseMetering({
       ...METERING,
       ClaudeSonnet55QueryDaily: { remainingAllowance: 79 },

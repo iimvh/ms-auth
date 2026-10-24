@@ -146,7 +146,7 @@ export async function run(argv: string[], options: RunOptions = {}): Promise<num
     emit(`export surface matches ${DEFAULT_SNAPSHOT_PATH}: ${counts}`);
     return 0;
   }
-  emit(...drift);
+  drift.forEach(emit);
   emit(`export surface drifted from ${DEFAULT_SNAPSHOT_PATH}: ${counts}`);
   return 1;
 }

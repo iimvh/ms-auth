@@ -17,7 +17,7 @@ describe("pre-flight credentials", () => {
 
   it("a successful pre-flight does not change behaviour", async () => {
     const ensure = vi.fn(async () => {});
-    const res = await handleChatCompletion(body(true), new SessionPool({ getToken: async () => "tok" }), { ensureCredentials: ensure });
+    const res = await handleChatCompletion(body(true), new SessionPool(), { ensureCredentials: ensure });
     expect(ensure).toHaveBeenCalledTimes(1);
     expect(res.status).toBe(200);
   });

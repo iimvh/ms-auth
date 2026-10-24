@@ -3,6 +3,8 @@ import { isAbsolute, relative } from "node:path";
 
 export const RAW_QUERY = "?raw";
 
+// Nitro's build makes readFileSync unreliable; a platform constraint.
+
 export interface RawModule {
   code: string;
   moduleSideEffects: false;

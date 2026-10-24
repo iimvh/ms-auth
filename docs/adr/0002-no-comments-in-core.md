@@ -77,7 +77,7 @@ These are kept, or converted, as stated. Everything else in
 | `proxy-lib/src/handler.ts:660–700` | keep | Disengagement is permanent; observed, undocumented |
 | `proxy-lib/src/healthz.ts:5–35` | keep 1 line | `/healthz` must not mint or spend a turn; a design constraint |
 | `proxy-lib/src/accounts-api.ts:26` | delete | The 404 is in the code path and will be covered by the proxy route tests |
-| `packages/proxy/server-accounts-ui.ts:4–7` | keep | Nitro's build makes `readFileSync` unreliable; a platform constraint |
+| `packages/proxy/ui/raw-plugin.ts` | keep 1 line | Nitro's build makes `readFileSync` unreliable; a platform constraint. Was `packages/proxy/server-accounts-ui.ts:4–7`, which #14 deleted |
 | `proxy-lib/src/index.ts:100–115` | delete | Logic |
 | `proxy-lib/src/index.ts:151` | delete | Describes the surface |
 

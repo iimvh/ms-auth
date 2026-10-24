@@ -5,11 +5,6 @@ import type { ParsedToolCall, ToolDef } from "../tools/tools.js";
 
 const log = createLogger("fenced");
 
-//
-// Known limitation: a `write_file` body that itself contains a ``` fence can't be
-// carried unambiguously — this is exactly where JSON wins, and the bench A/B will
-// show whether the escaping-free win on ordinary files outweighs it.
-
 const BODY_PARAM_NAMES = [
   "command", "content", "code", "body", "script", "text",
   "query", "input", "patch", "cmd", "data", "contents",

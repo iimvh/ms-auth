@@ -85,6 +85,33 @@ Perturbing any one of these turns the replay test red:
 | the cursor id is ignored (`composer.cursor` never called) | `expected 'Let me look through the files in notes/.bash\n\n```bash…' to be 'Let me look through the files in notes/.\n\n```bash…'` |
 | `onAbort` no longer sends the Stop frame | `expected '{"arguments":[{"scenario":"OfficeWebI…' to contain '"target":"stop"'` |
 
+## Recorded M365 turns (#3)
+
+Three real captures recorded on 2026-10-24 through a personal (MSA) account in
+`OfficeWebFreeConsumerCopilot`, replayed by
+`packages/core/src/protocol/frame-replay-recorded.test.ts`:
+
+| fixture | what M365 sent |
+|---|---|
+| `recorded-plain-answer.ndjson` | a one-sentence answer streamed as a cursor head snapshot ("Paris") plus two deltas, a separate throttling update, then `ReferencesListComplete`, the type:2 completion with the user echo, and type:3 |
+| `recorded-throttling-update.ndjson` | a refusal-to-edit answer with the sandbox frames (`contentType:"Code"`, `hiddenText` bash runs), the throttling update, and a type:7 `allowReconnect` after type:3 |
+| `recorded-disengaged.ndjson` | the filter firing: an "Apology" message streamed as text, a `messageType:"Disengaged"` update (`contentOrigin:"DeepLeo"`, `hiddenText:"> Conversation disengaged"`), and a second Disengaged marker (`contentOrigin:"JailBreakClassifier"`, `hiddenText:"Disengaged by JailBreak Classifier"`) in the type:2 completion |
+
+The recordings pin what the synthetic fixture approximates:
+
+- the real server says **Disengaged comes in an update frame** (before type:2)
+  *and* repeats the marker in the completion item, so `stream.messageType`
+  ends as `"Disengaged"` (last write) — the open question #3's earlier review
+  could not settle from the repo;
+- the apology **is** streamed as content (`contentOrigin:"Apology"` with no
+  `messageType`, so the `!m.messageType` snapshot gate passes it);
+- throttling arrives as its own update argument with all three numbers, and a
+  second, richer copy (with `metering`) rides the type:2 item.
+
+The captures are real dumps, not hand-written: only the `locationInfo` blobs
+M365 attaches to the user echo were blanked (the repo is public), everything
+else is byte-for-byte what the proxy wrote.
+
 ## Running it
 
 ```sh
@@ -93,3 +120,9 @@ pnpm build && npx vitest run packages/core/src/frame-replay.test.ts
 
 No M365 request is made: `ws` is mocked with `RecordingWebSocket` and no real
 credential or account is touched, so no quota is spent.
+
+```sh
+npx vitest run packages/core/src/protocol/frame-replay-recorded.test.ts
+```
+
+replays the three recorded captures through the same path (also offline).

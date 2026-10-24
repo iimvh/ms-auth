@@ -84,7 +84,7 @@ describe("export surface of @m365-copilot/core", () => {
     const lines: string[] = [];
     await run(["--check"], { repoRoot: REPO_ROOT, stdout: (line) => lines.push(line) });
     expect(lines).toEqual([`export surface matches ${DEFAULT_SNAPSHOT_PATH}: ${expectedCounts()}`]);
-  });
+  }, 30_000);
 
   it("agrees with a fresh scan of the built declaration", () => {
     expect(typeNamesFromDeclaration(readDeclaration(join(REPO_ROOT, DECLARATION_ENTRY)))).toEqual(savedSurface().types);

@@ -44,7 +44,6 @@ function twoAccounts() {
   new PersonalStore(join(accountsDir(), "work", "session.json")).write(record("token-work"));
 }
 
-/** Run one real turn through ModelSession and the real transport. */
 async function turn(accountId: string | null): Promise<{ url: string; payload: string; text: string }> {
   const session = new ModelSession({ accountId, useAgent: false });
   const pending = session.run("hi", "m365-copilot", undefined, false);

@@ -56,7 +56,6 @@ describe("PersonalStore", () => {
     const hour = 3_600_000;
     expect(store.isFresh(record({ capturedAt: 0, expiresAt: hour }), 500_000)).toBe(true);
     expect(store.isFresh(record({ capturedAt: 0, expiresAt: hour }), hour - 350_000)).toBe(false);
-    // a 60 s token gets a 30 s skew, not a 5 min one that would always be stale
     expect(store.isFresh(record({ capturedAt: 0, expiresAt: 60_000 }), 20_000)).toBe(true);
   });
 

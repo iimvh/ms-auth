@@ -208,8 +208,6 @@ describe("dependency graph baseline", () => {
     expect(baseline.nodes).toContain(`${ADAPTER_ROOT}/msal/auth.ts`);
     const reaches = (from: string, to: string) =>
       baseline.edges.some((e: { from: string; to: string }) => e.from === from && e.to === to);
-    // The credential decision lives in the app; the transport is handed a context
-    // and reaches no adapter, auth or account module at all (#9).
     expect(reaches(`${CORE_SRC}/app/credential.ts`, `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
     expect(reaches(`${CORE_SRC}/app/credential.ts`, `${CORE_SRC}/adapters/personal/personal-auth.ts`)).toBe(true);
     for (const adapter of [`${ADAPTER_ROOT}/msal/auth.ts`, `${ADAPTER_ROOT}/personal/personal-auth.ts`, `${CORE_SRC}/account-registry.ts`]) {

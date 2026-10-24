@@ -26,7 +26,6 @@ const bash: ToolDef = {
     parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
   },
 };
-// A harness whose shell really is PowerShell, and one that declares nothing.
 const powershell: ToolDef = {
   type: "function",
   function: {
@@ -170,9 +169,6 @@ describe("parseFencedToolCalls", () => {
     expect(calls).toHaveLength(2);
   });
 
-  // The model nests same-length fences and means them as nested. The old regex
-  // closed the outer fence on the backticks that OPEN the first inner ```bash, so
-  // inner examples 2..N surfaced at top level and were executed.
   it("never executes ```bash examples nested inside a prose document", () => {
     const doc = [
       "Here is the summary, ready to save as ozet.md:", "", "```markdown", "# Summary", "",
@@ -181,7 +177,7 @@ describe("parseFencedToolCalls", () => {
     ].join("\n");
     const { calls, leftover } = parseFencedToolCalls(doc, specs);
     expect(calls).toHaveLength(0);
-    expect(leftover).toContain("rm -rf /tmp/demo"); // stays prose
+    expect(leftover).toContain("rm -rf /tmp/demo");
   });
 
   it("carries a write_file body that itself contains balanced fences", () => {
@@ -191,10 +187,6 @@ describe("parseFencedToolCalls", () => {
     expect(JSON.parse(calls[0].function.arguments)).toEqual({ path: "README.md", content: body });
   });
 
-  // The baseline framing teaches `cat > f <<'EOF'` for writing files. Writing a
-  // Markdown file that contains code fences that way used to be cut at the first
-  // inner fence — the old closer matched the backticks opening "```bash" — so the
-  // shell got `cat > ozet.md <<'EOF'\n# Title` and an unterminated heredoc.
   it("keeps a heredoc that writes a fenced Markdown file intact", () => {
     const heredoc = ["cat > ozet.md <<'EOF'", "# Title", "", "```bash", "pnpm install", "```", "EOF"].join("\n");
     const { calls } = parseFencedToolCalls(`\`\`\`bash\n${heredoc}\n\`\`\``, specs);
@@ -208,9 +200,6 @@ describe("parseFencedToolCalls", () => {
     expect(calls.map((c) => JSON.parse(c.function.arguments).command)).toEqual(["ls"]);
   });
 
-  // Shapes the pre-scanner regex accepted, so a call the model already got
-  // through must not now vanish into prose: the model would read the empty turn
-  // as "I have no tools".
   it("still parses a call whose closing fence is glued to the command", () => {
     const { calls } = parseFencedToolCalls("```bash\nls -la```", specs);
     expect(calls.map((c) => JSON.parse(c.function.arguments).command)).toEqual(["ls -la"]);
@@ -235,8 +224,6 @@ describe("parseFencedToolCalls", () => {
   });
 });
 
-// Opus ends some fenced calls with its native function-call closer (docs §24 F56).
-// These are the replies it actually sent on the count-lines task, verbatim.
 describe("native call closer leaking into a fence (Opus)", () => {
   const SCRIPT = "#!/bin/bash\nwc -l < data.txt | tr -d ' ' > count.txt";
   function argsOf(text: string) {
@@ -387,14 +374,12 @@ describe("shell routing (Tier 1)", () => {
   });
 
   it("leaves a dotted/hyphenated info-string that is not a tool in prose", () => {
-    // Widening the fence regex to allow . and - must not turn language tags into calls.
     const specs = buildSpecMap([runCommand]);
     expect(parseFencedToolCalls("```objective-c\nint x;\n```", specs).calls).toHaveLength(0);
     expect(parseFencedToolCalls("```asp.net\n<%= x %>\n```", specs).calls).toHaveLength(0);
   });
 
   it("does not hijack ```bash when a real tool is literally named bash", () => {
-    // bash tool present → ```bash maps to it directly (not via alias), name stays bash
     const specs = buildSpecMap([bash, readFile]);
     expect(parseFencedToolCalls("```bash\nls\n```", specs).calls[0]?.function.name).toBe("bash");
   });
@@ -404,8 +389,6 @@ describe("shell routing (Tier 1)", () => {
     expect(formatFencedToolDefinitions([readFile, writeFile])).not.toContain("WRITING A SHELL SCRIPT");
   });
 
-  // #7: these were silently demoted to prose, so a model correctly told to use
-  // PowerShell produced turns that executed nothing.
   it("routes Windows shell fences to the harness shell tool", () => {
     const specs = buildSpecMap([runCommand]);
     for (const lang of ["powershell", "pwsh", "ps1", "cmd", "bat", "batch"]) {
@@ -421,10 +404,6 @@ describe("hostPlatformNote", () => {
   it("is empty off Windows, so POSIX framing stays byte-for-byte", () => {
     expect(hostPlatformNote(bash, "linux")).toBe("");
     expect(hostPlatformNote(bash, "darwin")).toBe("");
-    // formatFencedToolDefinitions has no platform parameter, so this assertion
-    // reads the HOST — it only means "off Windows" when the suite runs off Windows.
-    // Asserted against the real platform instead of hardcoded absent, or the suite
-    // fails on a Windows checkout (where the note is the correct output).
     expect(formatFencedToolDefinitions([bash, readFile]).includes("HOST PLATFORM"))
       .toBe(process.platform === "win32");
   });
@@ -433,10 +412,6 @@ describe("hostPlatformNote", () => {
     expect(hostPlatformNote(undefined, "win32")).toBe("");
   });
 
-  // A Windows HOST is not a PowerShell SHELL. pi on Windows sends a tool named
-  // `bash`, described as "Execute a bash command", backed by Git Bash — telling it
-  // to emit PowerShell returns `/usr/bin/bash: Write-Output: command not found`
-  // and the model gives up concluding it has no tools (#7).
   it("keeps POSIX idioms when the harness's shell tool is a bash on Windows", () => {
     const note = hostPlatformNote(bash, "win32");
     expect(note).toContain("HOST PLATFORM: Windows");
@@ -448,8 +423,6 @@ describe("hostPlatformNote", () => {
     expect(note).toContain("/mnt/data");
   });
 
-  // pi's shell tool on Windows cuts a command past ~8,190 chars silently (a
-  // 12,070-char heredoc wrote 8,164 bytes); its write tool took 50,000 intact.
   it("steers long file writes to the harness's write tool on a Windows bash", () => {
     const write: ToolDef = {
       type: "function",
@@ -463,7 +436,6 @@ describe("hostPlatformNote", () => {
     const note = hostPlatformNote(bash, "win32", write);
     expect(note).toContain("8,000 characters");
     expect(note).toContain("with the `write` tool, never in one heredoc");
-    // No write tool: fall back to appending in parts rather than one heredoc.
     expect(hostPlatformNote(bash, "win32")).toContain("cat >> file");
   });
 
@@ -474,7 +446,6 @@ describe("hostPlatformNote", () => {
   it("reads the dialect off the tool, and M365_HOST_SHELL overrides it", () => {
     expect(shellDialect(bash, "win32")).toBe("posix");
     expect(shellDialect(powershell, "win32")).toBe("powershell");
-    // Undeclared name falls back to the host's native shell.
     expect(shellDialect(unlabelledShell, "win32")).toBe("powershell");
     expect(shellDialect(unlabelledShell, "linux")).toBe("posix");
     process.env.M365_HOST_SHELL = "powershell";
@@ -489,14 +460,12 @@ describe("hostPlatformNote", () => {
     const note = hostPlatformNote(powershell, "win32");
     expect(note).toContain("HOST PLATFORM: Windows");
     expect(note).toContain("```powershell");
-    // The specific idioms baseline framing teaches by name must be countermanded.
     for (const posix of ["EOF", "sed -i", "ls", "grep"]) {
       expect(note, `${posix} should be countermanded`).toContain(posix);
     }
     expect(note).toContain("Set-Content");
     expect(note).toContain("Get-ChildItem");
     expect(note).toContain("Select-String");
-    // #12: the sandbox the model drifts to when POSIX commands fail.
     expect(note).toContain("/mnt/data");
   });
 
@@ -515,7 +484,6 @@ describe("longHeredocAsWrite", () => {
     },
   };
   const tools = [bash, write];
-  // Over the cap, with a fence and Turkish text, like the real ozet.md write.
   const body = ["# Proje Özeti", "", "```bash", "pnpm install", "```", "", "ı ş ğ ü ö ç " + "x".repeat(9000)].join("\n");
   const shellCall = (command: string) => ({
     id: "call_x",
@@ -527,7 +495,6 @@ describe("longHeredocAsWrite", () => {
   it("sends an over-cap quoted heredoc as the write tool, byte-for-byte", () => {
     const r = longHeredocAsWrite(shellCall(`cat > ozet.md <<'EOF'\n${body}\nEOF`), tools, "win32");
     expect(r?.call.function.name).toBe("write");
-    // A heredoc writes its body plus the final newline.
     expect(args(r!.call)).toEqual({ path: "ozet.md", content: `${body}\n` });
     expect(r?.skipped).toBe("");
   });
@@ -546,28 +513,17 @@ describe("longHeredocAsWrite", () => {
 
   it("leaves everything else alone", () => {
     const long = (c: string) => shellCall(c);
-    // Under the cap: the command line carries it intact.
     expect(longHeredocAsWrite(long("cat > a.md <<'EOF'\nshort\nEOF"), tools, "win32")).toBeNull();
-    // Off Windows: no cap to work around.
     expect(longHeredocAsWrite(long(`cat > a.md <<'EOF'\n${body}\nEOF`), tools, "linux")).toBeNull();
-    // Unquoted delimiter: bash expands $ and ` in the body, so a literal write could differ.
     expect(longHeredocAsWrite(long(`cat > a.md <<EOF\n${body}\nEOF`), tools, "win32")).toBeNull();
-    // Append: the write tool would overwrite.
     expect(longHeredocAsWrite(long(`cat >> a.md <<'EOF'\n${body}\nEOF`), tools, "win32")).toBeNull();
-    // A path bash would expand.
     expect(longHeredocAsWrite(long(`cat > $HOME/a.md <<'EOF'\n${body}\nEOF`), tools, "win32")).toBeNull();
-    // No write tool to route to.
     expect(longHeredocAsWrite(long(`cat > a.md <<'EOF'\n${body}\nEOF`), [bash], "win32")).toBeNull();
-    // A `cd` first: a relative path would land somewhere else via the write tool.
     expect(longHeredocAsWrite(long(`cd docs && cat > a.md <<'EOF'\n${body}\nEOF`), tools, "win32")).toBeNull();
     expect(longHeredocAsWrite(long(`cd docs\ncat > a.md <<'EOF'\n${body}\nEOF`), tools, "win32")).toBeNull();
-    // A piped cat is not a plain file write.
     expect(longHeredocAsWrite(long(`echo x | cat > a.md <<'EOF'\n${body}\nEOF`), tools, "win32")).toBeNull();
   });
 
-  // Measured: the model bundled exploration and the write into one 13,185-char
-  // call (`printf`/`find` first, `cat > ozet.md <<'EOF'` last) and the file
-  // landed truncated. Keep the write; report what didn't run.
   it("pulls the heredoc out of a compound command and reports the rest", () => {
     const r = longHeredocAsWrite(
       shellCall(`printf '%s\\n' '--- tree ---'\nfind packages -type f | sort\ncat > ozet.md <<'EOF'\n${body}\nEOF\nwc -l ozet.md`),
@@ -592,7 +548,6 @@ describe("formatFencedToolDefinitions", () => {
     expect(out).toContain("```bash");
     expect(out).toContain("```write_file");
     expect(out).toContain("<<<<<<< SEARCH");
-    // Stresses the action-not-illustration contract
     expect(out).toContain("ACTION");
     expect(out).toContain("PRIMARY JOB");
   });
@@ -600,9 +555,6 @@ describe("formatFencedToolDefinitions", () => {
 
 describe("defaultFramingForTone", () => {
   it("gives both Opus models relay_batch — no jailbreak trips, and fewest turns (§24 F56, F60)", () => {
-    // minimal 12/30 and baseline 8/30 tasks Disengaged, the user-voice relays 0.
-    // relay_batch: 2.30 turns per bench task vs relay's 3.65 — and Opus 5.5's
-    // budget counts turns (F55). `minimal`'s shorter prompt saved nothing.
     expect(defaultFramingForTone("Claude_Opus")).toBe("relay_batch");
     for (const id of ["claude-opus", "claude-opus-5.5", "claude-opus-4.8", "claude-opus-4.5", "claude-opus-4-8-20261001", "claude-opus-5[1m]"]) {
       expect(defaultFramingForModel(id)).toBe("relay_batch");
@@ -618,8 +570,6 @@ describe("defaultFramingForTone", () => {
   });
 
   it("asks for batching only when there's a shell to batch in — otherwise it is relay (§25 H25b)", () => {
-    // Shell-less, "a script can look at the files…" read as a request only its
-    // own sandbox could meet: Sonnet 4.6 3/7 vs relay 6/6.
     expect(formatFencedToolDefinitions([readFile], "relay_batch")).toBe(formatFencedToolDefinitions([readFile], "relay"));
     expect(formatFencedToolDefinitions([bash, readFile], "relay_batch")).not.toBe(formatFencedToolDefinitions([bash, readFile], "relay"));
   });
@@ -631,8 +581,6 @@ describe("defaultFramingForTone", () => {
   });
 
   it("gives the Claude_Sonnet tone the <system>-free relay_batch (Sonnet 4.6, §25 F62)", () => {
-    // Both Sonnets read the <system>-tagged baseline as an injected prompt (§21);
-    // batching cut Sonnet 4.6's turns 14% on the bench and 21% in real pi.
     expect(defaultFramingForTone("Claude_Sonnet")).toBe("relay_batch");
   });
 
@@ -641,28 +589,16 @@ describe("defaultFramingForTone", () => {
   });
 
   it("gives GPT-6 relay_batch — it runs agent-less, next to M365's code interpreter (#41)", () => {
-    // Not because it is paid-gated (Opus 5.5 is gated too): GPT-6
-    // never served with the tool agent, and agent-less under baseline it worked
-    // in the code interpreter instead of acting — 0/30 vs relay 30/30 (docs §22 F47).
-    // relay_batch keeps relay's user voice and cuts its turns by a third (§25 F61).
     expect(defaultFramingForTone("Gpt_6_Reasoning")).toBe("relay_batch");
     expect(defaultFramingForModel("gpt-6-think-deeper")).toBe("relay_batch");
   });
 
   it("gives GPT-6 Sol relay_batch on both of its paths, agent and agent-less (#23, docs §28)", () => {
-    // One default for both: agent-less (non-premium) it has its own sandbox and
-    // only the user-voice relay kept it out (60/60 vs ≤6/10); with the agent
-    // (premium) relay 30/30 vs 3–9/10 for the rest (docs §23). relay_batch keeps
-    // that voice, cuts turns by a third, and on the retest didn't send it to the
-    // sandbox any more often than relay (§28; F61's 4 vs 2 was noise).
     expect(defaultFramingForTone("Gpt_6_Sol_Reasoning")).toBe("relay_batch");
     expect(defaultFramingForModel("gpt-6-sol")).toBe("relay_batch");
   });
 
   it("gives GPT-6.1 Sol relay_batch on both of its paths (docs §27, §29)", () => {
-    // Only the user-voice framings keep it out of its sandbox agent-less, as with
-    // GPT-6 Sol, and relay_batch never sent it there (0 of 80 tasks and pi runs)
-    // and saved turns on both paths, bench and real pi alike.
     expect(defaultFramingForTone("Gpt_61_Sol_Reasoning")).toBe("relay_batch");
     expect(defaultFramingForModel("gpt-6.1-sol")).toBe("relay_batch");
   });
@@ -671,17 +607,13 @@ describe("defaultFramingForTone", () => {
     const lean = formatFencedToolDefinitions([bash, readFile], "minimal");
     const baseline = formatFencedToolDefinitions([bash, readFile], "baseline");
     expect(lean.length).toBeLessThan(baseline.length / 2);
-    // …while keeping the two load-bearing levers: shell-routing + anti-confab.
     expect(lean).toContain("```bash");
     expect(lean).toContain("run nothing yet");
   });
 });
 
 describe("defaultFramingForModel", () => {
-  // `Claude_Sonnet` is Sonnet 4.6 on the included scenario and Sonnet 5.5 on
-  // the paid one, so the tone alone can't choose Sonnet 5.5's framing.
   it("keeps Sonnet 5 on relay, including unmapped Sonnet 5 strings", () => {
-    // Batching saved 15% of Sonnet 5's bench turns but only 6% in real pi (§25 F63).
     for (const id of ["claude-sonnet-5", "claude-sonnet-5[1m]"]) {
       expect(defaultFramingForModel(id)).toBe("relay");
     }
@@ -701,7 +633,7 @@ describe("defaultFramingForModel", () => {
 
   it("falls through to the tone default for everything else", () => {
     expect(defaultFramingForModel("claude-opus")).toBe("relay_batch");
-    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBeUndefined(); // unmeasured: stays baseline
+    expect(defaultFramingForModel("claude-sonnet-think-deeper")).toBeUndefined();
     expect(defaultFramingForModel("m365-copilot")).toBeUndefined();
     expect(defaultFramingForModel("gpt-5.5-think-deeper")).toBeUndefined();
   });
@@ -741,8 +673,6 @@ describe("currentFramingVariant", () => {
 });
 
 describe("header value coercion (strict-harness schema conformance)", () => {
-  // Zed validates tool arguments against the declared schema and rejects a
-  // string where the schema said integer/boolean/array.
   const typed: ToolDef = {
     type: "function",
     function: {
@@ -780,20 +710,15 @@ describe("header value coercion (strict-harness schema conformance)", () => {
     expect(parse("path: /a\nrecursive: no").recursive).toBe(false);
   });
 
-  // The load-bearing cases: tool calling is prompt-emulated, so the model puts
-  // prose in typed slots routinely. A value that can't be coerced must stay a
-  // string the harness rejects loudly — never become a plausible wrong value.
   it("leaves an unparseable number as a string rather than emitting null", () => {
-    // parseInt("the whole file") is NaN, and JSON.stringify(NaN) is `null` —
-    // a value the harness would accept and act on.
     expect(parse("path: /a\noffset: the whole file").offset).toBe("the whole file");
     expect(parse("path: /a\noffset: n/a").offset).toBe("n/a");
-    expect(parse("path: /a\noffset: 12abc").offset).toBe("12abc"); // parseInt would say 12
+    expect(parse("path: /a\noffset: 12abc").offset).toBe("12abc");
   });
 
   it("leaves a non-integer as a string where the schema demands an integer", () => {
     expect(parse("path: /a\noffset: 1.5").offset).toBe("1.5");
-    expect(parse("path: /a\nratio: 1.5").ratio).toBe(1.5); // but `number` accepts it
+    expect(parse("path: /a\nratio: 1.5").ratio).toBe(1.5);
   });
 
   it("leaves an unrecognised boolean as a string rather than guessing false", () => {
@@ -802,7 +727,7 @@ describe("header value coercion (strict-harness schema conformance)", () => {
   });
 
   it("never ships a non-array for an array-typed param", () => {
-    expect(parse("path: /a\nglobs: 5").globs).toEqual(["5"]); // JSON.parse would give 5
+    expect(parse("path: /a\nglobs: 5").globs).toEqual(["5"]);
     expect(parse('path: /a\nglobs: {"a":1}').globs).toEqual(['{"a":1}']);
     expect(parse("path: /a\nglobs: *.ts").globs).toEqual(["*.ts"]);
     expect(parse("path: /a\nglobs: ").globs).toEqual([]);
@@ -814,7 +739,6 @@ describe("header value coercion (strict-harness schema conformance)", () => {
 });
 
 describe("array and object params written as a YAML block (#50)", () => {
-  // pi's `edit` tool: the tools block shows it as `edits: <edits>`.
   const piEdit: ToolDef = {
     type: "function",
     function: {
@@ -896,7 +820,6 @@ describe("array and object params written as a YAML block (#50)", () => {
 });
 
 describe("multi-line string values in a header-only fence (#82)", () => {
-  // opencode's `edit`: every param is a header line (no body, no edit pair).
   const ocEdit: ToolDef = {
     type: "function",
     function: {

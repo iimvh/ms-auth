@@ -48,10 +48,6 @@ const withEnv = <T>(vars: Record<string, string>, fn: () => T): T => {
   }
 };
 
-// `allocateAccount` and the mock write into `<config>/accounts/<id>/`, and the
-// id lives under the real config dir whenever the registry path alone is
-// mocked — so the whole file runs against a temporary `M365_ACCOUNT_HOME`
-// (the developer's live ~/.config/opencode-m365 is never touched).
 let home: string;
 beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), "ar-home-"));
@@ -60,8 +56,6 @@ beforeAll(() => {
 
 afterEach(() => {
   clearMockRegistry();
-  // clearMockRegistry drops M365_ACCOUNT_HOME too; put this file's home back so
-  // no later test (or a second useMockRegistry) runs against the real dir.
   process.env.M365_ACCOUNT_HOME = home;
   delete process.env.M365_PERSONAL_CDP_URL;
 });
@@ -69,8 +63,6 @@ afterEach(() => {
 const registry = (accounts: AccountRegistry["accounts"], activeId = accounts[0]?.id ?? "default"): AccountRegistry =>
   ({ version: 1, activeId, accounts });
 
-// The developer's real data dir, spelled out independently of the module so the
-// guard tests below assert against the true location.
 const REAL_CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
 
 describe("account ids", () => {
@@ -99,9 +91,6 @@ describe("allocateAccount", () => {
   });
 
   it("skips ports already allocated, starting at the default and going up", () => {
-    // The plan's case (9222 + 9224 taken ⇒ 9225) contradicts the plan's own
-    // spec, "Ports default to 9222, then the next free port upward": with 9222
-    // taken the first free port is 9223, which is what the next test pins.
     const bookkeeping = { label: "X", sessionFile: join(accountsDir(), "x", "session.json"), profileDir: join(accountsDir(), "x", "profile"), createdAt: new Date().toISOString() };
     const reg = registry([
       { ...bookkeeping, id: "a", cdpPort: ACCOUNT_CDP_PORT },
@@ -146,9 +135,6 @@ describe("the registry source", () => {
   });
 
   it("useMockRegistry redirects the account home, so a mock can never write into the real data dir", () => {
-    // The defect this pins: two test files called useMockRegistry before setting
-    // M365_ACCOUNT_HOME, so a whole `npx vitest run` created
-    // ~/.config/opencode-m365/accounts/{default,work} on the developer's machine.
     clearMockRegistry();
     delete process.env.M365_ACCOUNT_HOME;
     const src = useMockRegistry([{ id: "default" }, { id: "work" }]);
@@ -204,8 +190,6 @@ describe("readRegistry", () => {
   });
 
   it("falls back to copy+unlink when rename cannot cross volumes", () => {
-    // Simulated by a source whose path is on another root: we assert the outcome
-    // only — the file holds the new registry and no *.tmp-* file remains.
     const dir = mkdtempSync(join(tmpdir(), "ar-"));
     process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
     const src = accountRegistrySource(join(dir, "accounts.json"));
@@ -220,7 +204,6 @@ describe("migrateRegistry", () => {
   it("points at today's files without moving or copying anything", () => {
     const dir = mkdtempSync(join(tmpdir(), "ar-"));
     process.env.M365_ACCOUNTS_FILE = join(dir, "accounts.json");
-    // Today's real layout, in miniature.
     const todayFile = join(configDir(), "personal-session.json");
     const before = existsSync(todayFile);
     const { created, registry: reg } = migrateRegistry(undefined, new Date("2026-10-23T05:00:00.000Z"));
@@ -231,7 +214,7 @@ describe("migrateRegistry", () => {
       id: "default", label: "Personal (free)", cdpPort: 9222, sessionFile: todayFile,
       profileDir: join(configDir(), "personal-profile"), createdAt: "2026-10-23T05:00:00.000Z",
     });
-    expect(existsSync(todayFile)).toBe(before); // nothing was created, moved or renamed
+    expect(existsSync(todayFile)).toBe(before);
   });
 
   it("writes nothing when a registry already exists (idempotent)", () => {
@@ -293,16 +276,13 @@ describe("registryStatus", () => {
   });
 
   it("never throws when the registry path cannot be read", () => {
-    process.env.M365_ACCOUNTS_FILE = tmpdir(); // a directory, not a file
+    process.env.M365_ACCOUNTS_FILE = tmpdir();
     expect(() => registryStatus()).not.toThrow();
     expect(registryStatus().problem!.code).toBe("unreadable");
   });
 });
 
 describe("account CRUD", () => {
-  // Each test starts from its own account home: `addAccount`/`removeAccount`
-  // write real directories, and a leftover `accounts/<id>/session.json` from the
-  // previous test would (rightly) refuse the next `addAccount`.
   beforeEach(() => {
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
   });
@@ -336,7 +316,7 @@ describe("account CRUD", () => {
     expect(chathubOid("ABC123@tenant-x")).toBe("abc123");
     expect(chathubOid("no-at-sign")).toBeNull();
     const same = addAccount("work", "Work");
-    expect(same.warning).toBeNull(); // the new account has no record yet
+    expect(same.warning).toBeNull();
     new PersonalStore(same.entry.sessionFile).write({ ...defaultRecord, scenario: "S", variants: "v",
       licenseType: "Free", agentHost: "h", product: null, source: "officeweb", optionsSets: [],
       allowedMessageTypes: ["Chat"], expiresAt: 1, capturedAt: 0, emailHint: null, probe: null,
@@ -373,7 +353,6 @@ describe("account CRUD", () => {
     useMockRegistry([{ id: "default" }, { id: "work" }]);
     activateAccount("work");
     try { removeAccount("work"); } catch (e) { expect((e as AccountError).code).toBe("active"); }
-    // A fresh home, so the previous test's `work` cannot make `only` non-last.
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
     useMockRegistry([{ id: "only" }]);
     try { removeAccount("only"); } catch (e) { expect((e as AccountError).code).toBe("last_account"); }
@@ -414,8 +393,6 @@ describe("resolveAccount", () => {
     expect(() => resolveAccount({ id: "gone" })).toThrow(/gone/);
   });
 
-  // Whole-branch review: with a broken registry every `--account <id>` said
-  // "does not exist - known accounts: none", naming the wrong problem.
   it("a named account against a broken registry says the registry is broken", () => {
     clearMockRegistry();
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
@@ -447,7 +424,6 @@ describe("resolveAccount", () => {
     expect(lines.filter((l) => l.includes("overrides the registry"))).toHaveLength(1);
     expect(lines[0]).toContain("M365_PERSONAL_CDP_URL overrides the registry; account switching will not change the CDP target");
     withEnv({ M365_PERSONAL_CDP_URL: "http://127.0.0.1:9999" }, () => { resolveAccount(); resolveAccount(); });
-    // still one override line: the warning is once per process per variable
     expect(lines.filter((l) => l.includes("overrides the registry"))).toHaveLength(1);
   });
   it("warns on a partial override too - it splits the pair", () => {
@@ -455,7 +431,7 @@ describe("resolveAccount", () => {
     const lines: string[] = [];
     withEnv({ M365_PERSONAL_PROFILE: "/tmp/elsewhere" }, () => resolveAccount({ onWarn: (l) => lines.push(l) }));
 
-    expect(lines).toHaveLength(2); // the override line, then the split-pair line
+    expect(lines).toHaveLength(2);
     expect(lines.join("\n")).toContain("splits the record/profile/CDP pair");
     expect(lines.some((l) => l.includes("M365_PERSONAL_PROFILE"))).toBe(true);
   });

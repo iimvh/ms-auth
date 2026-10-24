@@ -7,7 +7,7 @@ function setup(overrides: Record<string, unknown> = {}) {
   const controller = createBackoffController({
     now: () => t,
     sleep: async (ms: number) => { slept.push(ms); },
-    rng: () => 0, // deterministic: jitter lands at jitterMinMs
+    rng: () => 0,
     windowMs: 1000,
     threshold: 3,
     baseCooldownMs: 5000,
@@ -36,7 +36,7 @@ describe("createBackoffController", () => {
     controller.note(true, "c3");
     expect(controller.isBackingOff()).toBe(true);
     const delay = await controller.waitForSlot();
-    expect(delay).toBe(100); // jitterMin, rng()=0
+    expect(delay).toBe(100);
     expect(slept).toEqual([100]);
   });
 
@@ -54,7 +54,7 @@ describe("createBackoffController", () => {
     controller.note(true, "c2");
     controller.note(true, "c3");
     expect(controller.isBackingOff()).toBe(true);
-    controller.note(false, "c3"); // recovered
+    controller.note(false, "c3");
     expect(controller.isBackingOff()).toBe(false);
     expect(await controller.waitForSlot()).toBe(0);
   });
@@ -64,7 +64,7 @@ describe("createBackoffController", () => {
     controller.note(true, "c1");
     controller.note(true, "c2");
     controller.note(true, "c3");
-    advance(5001); // past baseCooldownMs
+    advance(5001);
     expect(controller.isBackingOff()).toBe(false);
     expect(await controller.waitForSlot()).toBe(0);
     expect(slept).toEqual([]);
@@ -74,14 +74,14 @@ describe("createBackoffController", () => {
     const { controller, advance } = setup();
     controller.note(true, "a1");
     controller.note(true, "a2");
-    controller.note(true, "a3"); // level 1 → 5000ms window
-    advance(5001); // window elapsed
+    controller.note(true, "a3");
+    advance(5001);
     expect(controller.isBackingOff()).toBe(false);
     controller.note(true, "b1");
     controller.note(true, "b2");
-    controller.note(true, "b3"); // level 2 → 10000ms window
+    controller.note(true, "b3");
     advance(5001);
-    expect(controller.isBackingOff()).toBe(true); // still backing off (10s > 5s)
+    expect(controller.isBackingOff()).toBe(true);
     advance(5000);
     expect(controller.isBackingOff()).toBe(false);
   });
@@ -90,25 +90,24 @@ describe("createBackoffController", () => {
     const { controller, advance } = setup();
     controller.note(true, "a1");
     controller.note(true, "a2");
-    controller.note(true, "a3"); // backoff until t=5000
+    controller.note(true, "a3");
     advance(1000);
     controller.note(true, "b1");
     controller.note(true, "b2");
-    controller.note(true, "b3"); // ignored — still within window, no escalation
-    advance(4001); // t=5001, past the ORIGINAL window
+    controller.note(true, "b3");
+    advance(4001);
     expect(controller.isBackingOff()).toBe(false);
   });
 
   it("drops empties that fall outside the window", async () => {
     const { controller } = setup();
     controller.note(true, "c1");
-    // advance beyond windowMs via a fresh controller clock
     const { controller: c2, advance } = setup();
     c2.note(true, "c1");
-    advance(2000); // > windowMs (1000) → c1 expires
+    advance(2000);
     c2.note(true, "c2");
     c2.note(true, "c3");
-    expect(c2.isBackingOff()).toBe(false); // only 2 in-window
+    expect(c2.isBackingOff()).toBe(false);
     void controller;
   });
 
@@ -116,16 +115,14 @@ describe("createBackoffController", () => {
     const { controller, advance } = setup({ jitterMinMs: 3000, jitterMaxMs: 3000 });
     controller.note(true, "c1");
     controller.note(true, "c2");
-    controller.note(true, "c3"); // window until t=5000
-    advance(4000); // 1000ms remaining, but jitter wants 3000
+    controller.note(true, "c3");
+    advance(4000);
     const delay = await controller.waitForSlot();
-    expect(delay).toBe(1000); // capped at remaining
+    expect(delay).toBe(1000);
   });
 });
 
 let seq = 0;
-// The policy keys on distinct conversations; a unique id keeps one case's
-// empties from counting for another.
 const conv = () => `conv-${seq++}`;
 
 describe("per-account degradation backoff", () => {
@@ -136,7 +133,7 @@ describe("per-account degradation backoff", () => {
     const t0 = Date.now();
     await awaitDegradationBackoff("acct-b");
     expect(Date.now() - t0).toBeLessThan(1000);
-    noteRequestOutcome(false, conv(), "acct-a"); // clean: lifts its own window
+    noteRequestOutcome(false, conv(), "acct-a");
     expect(isDegradationBackoff("acct-a")).toBe(false);
   });
 

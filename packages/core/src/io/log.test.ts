@@ -5,7 +5,6 @@ import { join, parse, resolve } from "node:path";
 const CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
 const ABSOLUTE_LOG = join(parse(CONFIG_DIR).root, "tmp", "x", "a.log");
 
-/** log.ts reads the env once, at load, like the proxy does at startup. */
 async function load(env: Record<string, string | undefined>) {
   for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
   vi.resetModules();

@@ -18,8 +18,6 @@ const setup = (record: PersonalRecord | null, over: Partial<Pick<PersonalAuthDep
   const store = new PersonalStore(join(mkdtempSync(join(tmpdir(), "ps-")), "s.json"));
   if (record) store.write(record);
   const capture = vi.fn(async () => ({ ...fresh({ accessToken: "tok-new" }) }));
-  // Harvesting is the default mint, so a test that does not want it must say so:
-  // returning null is "no harvest available, capture instead".
   const harvest = vi.fn(async () => ({ capture: { ...fresh({ accessToken: "tok-harvested" }) }, rotated: true }));
   return {
     store,
@@ -29,7 +27,6 @@ const setup = (record: PersonalRecord | null, over: Partial<Pick<PersonalAuthDep
   };
 };
 
-/** A record whose harvest is deliberately unavailable. */
 const captureOnly = (record: PersonalRecord | null) => setup(record, { harvest: vi.fn(async () => null) });
 
 describe("PersonalAuthError", () => {
@@ -78,9 +75,6 @@ describe("getPersonalToken", () => {
   });
 
   it("a corrupt record is minted over and replaced with a good one", async () => {
-    // Minting over a broken file is the right repair — it leaves a usable record.
-    // The point of `inspect()` is that the operator hears about the broken file
-    // (personal-auth logs an error); it must not stop recovery.
     const { store, capture, deps } = captureOnly(fresh({ expiresAt: HOUR, capturedAt: 0 }));
     writeFileSync(store.path, "{broken");
     expect(await getPersonalToken(deps)).toBe("tok-new");
@@ -89,9 +83,6 @@ describe("getPersonalToken", () => {
   });
 
   it("a corrupt record still harvests, instead of falling through to the dead capture path", async () => {
-    // Regression: requiring a previous record to harvest made a corrupt file
-    // fatal. The harvest is skipped, the capture runs, Cloudflare refuses it and
-    // the operator sees `session_dead` for a file that only needed replacing.
     const { store, harvest } = setup(null);
     writeFileSync(store.path, "{broken");
     const capture = vi.fn(async () => {
@@ -130,9 +121,6 @@ describe("getPersonalToken", () => {
 });
 
 describe("a mint that cannot reach Chrome", () => {
-  // Both attempts failing to CONNECT is not a dead profile and not a bad
-  // capture: nothing was reached. The old message advised `login`, which cannot
-  // start the operator's Chrome with a debugging port (issue.md aggravator 1).
   const noChrome = () =>
     vi.fn(async () => {
       throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9222"), { code: "ECONNREFUSED" });
@@ -160,8 +148,6 @@ describe("a mint that cannot reach Chrome", () => {
 });
 
 describe("a harvest, which is the default mint", () => {
-  // A send usually yields a new token (5/6 rounds, F111) but not always, so the
-  // mint has to cope with both outcomes rather than assume either.
   it("keeps the token and does not charge a mint when the page did not rotate", async () => {
     const { store } = setup(fresh({ expiresAt: HOUR, capturedAt: 0, lastMintAt: HOUR, mintCount: 1 }));
     const harvest = vi.fn(async () => ({ capture: { ...fresh({ accessToken: "tok" }) }, rotated: false }));
@@ -220,7 +206,7 @@ describe("per-account mint state", () => {
     await expect(ensurePersonalCredentials("b", { getToken: boom })).rejects.toThrow(/account b is dead/);
     expect(boom).toHaveBeenCalledTimes(1);
     await ensurePersonalCredentials("a", { getToken: ok });
-    expect(ok).toHaveBeenCalledTimes(1); // a's success is still cached
+    expect(ok).toHaveBeenCalledTimes(1);
   });
 
   it("a failure is not cached, so the next call reports it again", async () => {

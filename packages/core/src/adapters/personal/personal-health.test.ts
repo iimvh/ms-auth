@@ -27,7 +27,6 @@ const record = (over: Partial<PersonalRecord> = {}): PersonalRecord => ({
   ...over,
 });
 
-/** A store backed by a real file (the health path must not care how it reads). */
 function storeWith(rec: PersonalRecord | null): PersonalStore {
   const store = new PersonalStore(join(mkdtempSync(join(tmpdir(), "ph-")), "s.json"));
   if (rec) store.write(rec);
@@ -50,8 +49,6 @@ describe("personalHealth", () => {
   });
 
   it("ok but hints when the record is fresh and no Chrome is running", async () => {
-    // Not at_risk: a fresh token serves turns without a browser. The risk is
-    // what happens when it goes stale, so the hint says that.
     const h = await personalHealth(deps(record(), false));
     expect(h.status).toBe("ok");
     expect(h.cdpReachable).toBe(false);
@@ -88,7 +85,6 @@ describe("personalHealth", () => {
       isFresh: () => false,
     } as unknown as PersonalStore;
     const h = await personalHealth({ store, probeCdp: async () => false, now: () => 0 });
-    // Present-but-unreadable is `corrupt`, not `at_risk`: the repair differs.
     expect(h.status).toBe("corrupt");
     expect(h.problem).toBe("unreadable");
   });
@@ -113,8 +109,6 @@ describe("personalHealth", () => {
   });
 
   it("a record saved with a UTF-8 BOM is still readable (not 'never logged in')", async () => {
-    // PowerShell's `Set-Content -Encoding UTF8` and many Windows editors do this;
-    // JSON.parse rejects the BOM, which used to make a good record look absent.
     const store = new PersonalStore(join(mkdtempSync(join(tmpdir(), "ph-")), "s.json"));
     const good = record();
     writeFileSync(store.path, "\uFEFF" + JSON.stringify(good));
@@ -124,7 +118,6 @@ describe("personalHealth", () => {
   });
 
   it("spends no turn: it never touches the mint path", async () => {
-    // Structural guarantee: the only deps are read/isFresh and a CDP probe.
     const d = deps(record({ expiresAt: 0 }), false);
     await personalHealth(d);
     expect(d.probeCdp).toHaveBeenCalledTimes(1);

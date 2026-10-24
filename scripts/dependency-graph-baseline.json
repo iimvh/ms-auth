@@ -2,8 +2,6 @@
   "adapterRoot": "packages/core/src/adapters",
   "nodes": [
     "@azure/msal-node",
-    "captured but broken",
-    "never logged in",
     "node:child_process",
     "node:crypto",
     "node:events",
@@ -112,31 +110,31 @@
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "otpauth",
       "specifier": "otpauth",
-      "line": 283
+      "line": 223
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "packages/core/src/io/log.ts",
       "specifier": "../../io/log.js",
-      "line": 32
+      "line": 30
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 343
+      "line": 270
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 512
+      "line": 393
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "zod/v4",
       "specifier": "zod/v4",
-      "line": 37
+      "line": 35
     },
     {
       "from": "packages/core/src/adapters/personal/personal-auth.ts",
@@ -207,7 +205,7 @@
       "from": "packages/core/src/adapters/personal/personal-capture.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 360
+      "line": 298
     },
     {
       "from": "packages/core/src/adapters/personal/personal-harvest-cdp.ts",
@@ -241,7 +239,7 @@
       "from": "packages/core/src/adapters/personal/personal-harvest-cdp.ts",
       "to": "playwright",
       "specifier": "playwright",
-      "line": 53
+      "line": 37
     },
     {
       "from": "packages/core/src/adapters/personal/personal-harvest.ts",
@@ -258,12 +256,6 @@
       "to": "packages/core/src/io/log.ts",
       "specifier": "../../io/log.js",
       "line": 1
-    },
-    {
-      "from": "packages/core/src/adapters/personal/personal-health.ts",
-      "to": "never logged in",
-      "specifier": "never logged in",
-      "line": 10
     },
     {
       "from": "packages/core/src/adapters/personal/personal-health.ts",
@@ -307,12 +299,6 @@
       "from": "packages/core/src/adapters/personal/personal-mode.ts",
       "to": "packages/core/src/adapters/personal/personal-session.ts",
       "line": 2
-    },
-    {
-      "from": "packages/core/src/adapters/personal/personal-session.ts",
-      "to": "captured but broken",
-      "specifier": "captured but broken",
-      "line": 11
     },
     {
       "from": "packages/core/src/adapters/personal/personal-session.ts",
@@ -732,36 +718,36 @@
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/adapters/msal/auth.ts",
       "specifier": "../adapters/msal/auth.js",
-      "line": 12
+      "line": 2
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/app/credential.ts",
       "specifier": "../app/credential.js",
-      "line": 14
+      "line": 4
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/budget/turn-budget.ts",
       "specifier": "../budget/turn-budget.js",
-      "line": 16
+      "line": 6
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/io/log.ts",
-      "line": 15
+      "line": 5
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/protocol/session.ts",
       "specifier": "../protocol/session.js",
-      "line": 13
+      "line": 3
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/routing/copilot.ts",
       "specifier": "../routing/copilot.js",
-      "line": 17
+      "line": 7
     },
     {
       "from": "packages/core/src/io/log.ts",

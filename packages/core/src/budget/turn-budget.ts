@@ -5,62 +5,16 @@ import { createLogger, fileLoggingEnabled, LOG_PATH } from "../io/log.js";
 
 const log = createLogger("turn-budget");
 
-// Throttle avoidance, OFF unless M365_AVOID_THROTTLING=1: wait before an
-// upstream turn until the account can afford it, so neither a bench sweep nor a
-// long pi session trips M365's `PerUserThrottled` (hypotheses §24 F58, §37).
 //
 // The model (F58): the account holds a bucket of ~100 turns that refills at
-// ~1.6 turns a minute; every upstream turn takes one (fresh conversation or
-// not, Disengaged included) and the throttle starts when it runs dry. Fitted on
-// four premium-account onsets, then predicted three more on all three accounts
-// to within a few turns without refitting — always a little optimistic (the
-// throttle came with 6 turns still "left" at worst), hence the reserve.
-//
-// The proxy writes one `[session] Chat turn` line per upstream turn, and a
-// `Turn result: Throttled` line per throttled turn, to its debug log when
-// M365_DEBUG=1. The replay reads every recently modified debug log under
-// ~/.config/opencode-m365 (archives included), plus M365_LOG_FILE, so every
-// process on the account that logs agrees on the bucket: the bench, its proxies,
-// a pi session's proxy. A proxy that doesn't log counts its own turns in memory.
-// The replay starts full only where the bucket was provably full: after a quiet
-// stretch of capacity/refill minutes (~1 h). It reads back 6 h, then 24 h, then
-// 72 h until it finds one, and starts EMPTY if it doesn't. (Starting full 6 h
-// back is wrong for anything busy for longer than that: once its opening burst
-// left the window the replay handed those ~70 turns back, the bench stopped
-// waiting, and the premium account throttled 6 h 11 min into a sweep run with
-// M365_AVOID_THROTTLING —
-// hypotheses §30.) Turns it can't see don't count: a proxy run without
-// M365_DEBUG on another process, the web client, another host on the same
-// account. The reserve absorbs some of that.
-//
-// After a throttled turn it also waits for HOLD minutes: the throttle lifts
-// with idle time, not with the bucket — on 2026-10-05 the premium account was
-// still throttled 60 min after its only throttled turn, with nothing sent in
-// between and the bucket long since refilled, while two non-premium accounts
-// were served again 57 and 60 min after theirs (F58). 75 covers every case seen.
-//
-// Two users: the bench waits before each task for the turns a whole task may
-// take (scripts/bench/turn-budget.mjs), and the proxy waits before each
-// upstream turn for one (awaitTurnBudget). Both keep the same reserve, so a
-// task the bench let start never waits inside the proxy.
-//
-// Env: M365_AVOID_THROTTLING=1 (turn the waiting on), M365_BUDGET_CAPACITY (100
-//   turns), M365_BUDGET_REFILL (1.6 turns/min), M365_BUDGET_RESERVE (20 turns kept
-//   back), M365_BUDGET_HOLD_MIN (75), M365_BUDGET_MAX_WAIT_MIN (15: the longest
-//   the proxy holds a streamed request; longer waits get a 429),
-//   M365_BUDGET_LOGS (more log files or dirs, `:`-separated; phase-sweep adds its
-//   archive), M365_LOG_FILE (as the logger reads it: relative to
-//   ~/.config/opencode-m365).
 
 export interface BudgetConfig {
   capacity: number;
   refillPerMin: number;
   reserve: number;
   holdMin: number;
-  /** How far back the logs are read first; budgetStatus reads 4x further, up to maxWindowMin, until the window holds a quiet stretch. */
   windowMin: number;
   maxWindowMin?: number;
-  /** The longest the proxy holds a streamed request waiting (awaitTurnBudget). */
   maxWaitMin: number;
   enabled: boolean;
   dirs: string[];
@@ -69,10 +23,7 @@ export interface BudgetConfig {
 export interface BudgetEvent {
   t: number;
   kind: "turn" | "throttled";
-  /** Identifies the event across files: the same log line seen twice counts once. */
   line: string;
-  /** The personal account the turn was spent on (§7.6); null/absent = the
-   *  builtin layout, or a log line written before the account tag existed. */
   account?: string | null;
 }
 
@@ -94,7 +45,6 @@ export interface BudgetDecision {
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== "" && Number.isFinite(Number(v)) ? Number(v) : d);
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode-m365");
-/** The furthest back the replay reads (72 h). */
 const MAX_WINDOW_MIN = 4320;
 
 export function budgetConfig(env: Record<string, string | undefined> = process.env): BudgetConfig {
@@ -115,26 +65,10 @@ export function budgetConfig(env: Record<string, string | undefined> = process.e
   };
 }
 
-// The account tag is appended LAST, so a line without one — every line written
-// before this change — still matches, and the untagged `Chat turn` form is
-// exactly what the builtin layout counted before. A tagged line belongs to
-// exactly one account.
-//
-// The tag is anchored to END OF LINE and read greedily from the left: the lines
-// this parses carry free text (`text="…"`, `errorCode`, `message`) that can
-// itself contain `account=…` — a prompt is the user's, so taking the first
-// `account=` would let a prompt charge another account's bucket and leave its
-// own uncharged. `$` (with /m) is the only anchor that cannot be fooled by
-// prompt text, because the tag is the last thing write() emits.
 const EVENT = /^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\] \[\w+\] \[session\] (Chat turn|Turn result: Throttled)(?:(?:[^\n]*?)(?: account=([a-z0-9][a-z0-9-]{0,31}))?)?$/gm;
 const LOG_FILE = /debug.*\.log$/;
 const SKIP_DIR = /^(browser-profile|node_modules)$|frames/;
 
-/**
- * Turn and throttle events in log text, for one account. `accountId`
- * undefined/null selects the builtin layout's events — the untagged ones — so a
- * single-account setup counts exactly what it counted before.
- */
 export function parseEvents(text: string, accountId?: string | null): BudgetEvent[] {
   const want = accountId ?? null;
   const out: BudgetEvent[] = [];
@@ -146,7 +80,6 @@ export function parseEvents(text: string, accountId?: string | null): BudgetEven
   return out;
 }
 
-/** Debug logs under `dirs` modified since `sinceMs`. A file named in `dirs` counts whatever its name. */
 export function findLogs(dirs: string[], sinceMs: number, depth = 3): string[] {
   const out: string[] = [];
   const isRecent = (p: string) => { try { return statSync(p).mtimeMs >= sinceMs; } catch { return false; } };
@@ -173,16 +106,9 @@ export function findLogs(dirs: string[], sinceMs: number, depth = 3): string[] {
   return [...new Set(out)];
 }
 
-// The proxy replays the logs before every turn, and a debug log only grows, so
-// each file is read once and then only from where the last read stopped.
 interface CachedLog { ino: number; size: number; mtimeMs: number; offset: number; keptFrom: number; events: BudgetEvent[] }
 const logCache = new Map<string, CachedLog>();
 
-/**
- * The events in one log file at or after `keepFrom`, reading only what was
- * appended since the last call. A line still being written waits for the next
- * read; a file that shrank or was replaced is read again from the start.
- */
 export function readLogEvents(path: string, keepFrom = 0): BudgetEvent[] {
   let st;
   try { st = statSync(path); } catch { logCache.delete(path); return []; }
@@ -213,16 +139,6 @@ export function readLogEvents(path: string, keepFrom = 0): BudgetEvent[] {
   return c.events;
 }
 
-/**
- * Replay events through the bucket and report it at `nowMs`. Pure.
- * Only events since `nowMs - windowMin` count; the logs hold every one of those.
- * A bucket left alone for capacity/refill minutes is full whatever came before,
- * so the replay starts full at the end of the LAST quiet stretch that long
- * (`settled`). A window busy throughout says nothing about where the bucket
- * stood when it opened, so the replay then starts there EMPTY, and
- * `settled: false` asks for a longer window. The same log line seen in two
- * files counts once.
- */
 export function replay(events: BudgetEvent[], nowMs: number, cfg: Pick<BudgetConfig, "windowMin" | "capacity" | "refillPerMin">): BudgetState {
   const start = nowMs - cfg.windowMin * 60_000;
   const fullAfterMs = (cfg.capacity / cfg.refillPerMin) * 60_000;
@@ -230,7 +146,6 @@ export function replay(events: BudgetEvent[], nowMs: number, cfg: Pick<BudgetCon
   const evs = events
     .filter((e) => e.t >= start && e.t <= nowMs && !seen.has(e.line) && seen.add(e.line))
     .sort((a, b) => a.t - b.t);
-  // A throttle before the quiet stretch still holds: the hold outlasts the refill.
   const lastThrottle = evs.reduce<number | null>((t, e) => (e.kind === "throttled" ? e.t : t), null);
   let first = -1;
   for (let i = evs.length; i >= 0; i--) {
@@ -252,10 +167,6 @@ export function replay(events: BudgetEvent[], nowMs: number, cfg: Pick<BudgetCon
   return { level, turns, lastThrottle, settled, since };
 }
 
-/**
- * Whether something needing `need` turns may start now, and if not, how long
- * until it may (assuming nothing else spends turns meanwhile).
- */
 export function decide(state: Pick<BudgetState, "level" | "lastThrottle">, need: number, nowMs: number, cfg: Pick<BudgetConfig, "reserve" | "holdMin" | "refillPerMin">): BudgetDecision {
   const want = need + cfg.reserve;
   const holdUntil = state.lastThrottle == null ? 0 : state.lastThrottle + cfg.holdMin * 60_000;
@@ -265,11 +176,6 @@ export function decide(state: Pick<BudgetState, "level" | "lastThrottle">, need:
   return { ok: waitMs === 0, waitMs, want, reason };
 }
 
-/**
- * The bucket at `nowMs` for one account, read back as far as it takes to find
- * where it was last full (see replay). `extra` are events no log holds (the
- * proxy's own, see below). `accountId` null/undefined = the builtin layout.
- */
 export function budgetStatus(
   nowMs = Date.now(),
   cfg: BudgetConfig = budgetConfig(),
@@ -286,9 +192,6 @@ export function budgetStatus(
   }
 }
 
-// --- The proxy's wait before each turn (awaitTurnBudget) ---
-
-/** awaitTurnBudget refused to wait that long: a throttle hold, or a refill past the request's limit. */
 export class TurnBudgetHold extends Error {
   constructor(
     readonly reason: BudgetDecision["reason"],
@@ -302,19 +205,10 @@ export class TurnBudgetHold extends Error {
   }
 }
 
-// This process's turns, recorded where session.ts logs them. Counted only when
-// this process doesn't write a debug log (otherwise the log already holds them).
-// Every entry carries whose turn it was (§7.6): one account's turns must never
-// make another wait.
 const ownEvents: Array<BudgetEvent & { account: string | null }> = [];
-// Turns let through but not yet started: the token, an image upload or the agent
-// lookup can come in between. Counted until session.ts records the turn, so a
-// request deciding meanwhile sees it.
 const grants: Array<{ t: number; account: string | null }> = [];
 const GRANT_TTL_MS = 5 * 60_000;
 let ownSeq = 0;
-// Requests waiting to decide, in arrival order. The first is deciding (and may
-// be sleeping on the bucket); the rest wait for it. `go` moves one to the front.
 interface InLine { go: () => void }
 const line: InLine[] = [];
 
@@ -324,29 +218,21 @@ function pruneOwn(nowMs: number): void {
   while (grants.length && grants[0]!.t < nowMs - GRANT_TTL_MS) grants.shift();
 }
 
-/** The key per-account budget state is held under; null = the builtin layout. */
 const keyOf = (accountId?: string | null): string | null => accountId ?? null;
 
-/** An upstream turn starting. CopilotSession.chat calls it where it logs `Chat turn`. */
 export function recordTurn(nowMs = Date.now(), accountId?: string | null): void {
   const key = keyOf(accountId);
   const i = grants.findIndex((g) => g.account === key);
   if (i >= 0) grants.splice(i, 1);
-  else grants.shift(); // adopt the oldest grant regardless, so one is never stranded
+  else grants.shift();
   ownEvents.push({ t: nowMs, kind: "turn", line: `own:${ownSeq++}`, account: key });
   pruneOwn(nowMs);
 }
 
-/** A throttled turn. session.ts calls it where it logs `Turn result: Throttled`. */
 export function recordThrottle(nowMs = Date.now(), accountId?: string | null): void {
   ownEvents.push({ t: nowMs, kind: "throttled", line: `own:${ownSeq++}`, account: keyOf(accountId) });
 }
 
-/**
- * The bucket as the proxy sees it, for one account: the logs, this process's
- * grants, and its own turns unless `logged` says its debug log already holds
- * them. `accountId` null/undefined = the builtin layout.
- */
 export function proxyBudgetStatus(
   nowMs = Date.now(),
   cfg: BudgetConfig = budgetConfig(),
@@ -365,7 +251,6 @@ export function proxyBudgetStatus(
   return budgetStatus(nowMs, { ...cfg, dirs }, extra, key);
 }
 
-/** Only for tests: forget this process's turns and grants. */
 export function resetTurnBudget(): void {
   ownEvents.length = 0;
   grants.length = 0;
@@ -373,7 +258,6 @@ export function resetTurnBudget(): void {
   line.length = 0;
 }
 
-/** Drop one account's in-process budget state (it was removed). */
 export function forgetAccountBudget(accountId: string): void {
   const keep = ownEvents.filter((e) => e.account !== accountId);
   ownEvents.length = 0;
@@ -393,32 +277,15 @@ const abortableSleep = (ms: number, signal?: AbortSignal) => new Promise<void>((
 const fmtWait = (ms: number) => (ms >= 90_000 ? `${(ms / 60_000).toFixed(1)} min` : `${Math.round(ms / 1000)} s`);
 
 export interface AwaitTurnBudgetOptions {
-  /** Aborts the wait (the client went away). */
   signal?: AbortSignal;
-  /** Wait at most this long in total, and never past cfg.maxWaitMin; longer waits throw TurnBudgetHold. */
   maxWaitMs?: number;
   cfg?: BudgetConfig;
-  /** Whether this process's turns reach its debug log (default: M365_DEBUG / M365_TRACE). */
   logged?: boolean;
-  /** Which account this turn is for; null/absent = the builtin layout. Its
-   *  bucket, its throttle hold, its place in line — another account's turns
-   *  never make this one wait (§7.6). */
   accountId?: string | null;
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
-/**
- * Before an upstream turn: wait until the account can afford one more turn plus
- * the reserve (see the header). A no-op unless M365_AVOID_THROTTLING is set.
- * Throws TurnBudgetHold instead of waiting longer than `maxWaitMs` — in a
- * throttle hold, typically — so the caller can answer 429 without sending a turn
- * that would only keep the throttle alive. Requests decide one at a time, so two
- * can't both take the last turn above the reserve. The wait counts from the
- * call, time behind other requests included, and the signal and the limit end it
- * there too: a request queued behind a long wait leaves the line at its own
- * limit, and one whose client went away doesn't keep its place (#77).
- */
 export async function awaitTurnBudget(opts: AwaitTurnBudgetOptions = {}): Promise<{ waitedMs: number }> {
   const cfg = opts.cfg ?? budgetConfig();
   if (!cfg.enabled) return { waitedMs: 0 };
@@ -433,7 +300,6 @@ export async function awaitTurnBudget(opts: AwaitTurnBudgetOptions = {}): Promis
       const at = now();
       const ahead = line.indexOf(me);
       const st = proxyBudgetStatus(at, cfg, opts.logged, opts.accountId);
-      // What the requests ahead and this one need; at least the front's next re-read.
       const d = decide(st, 1 + ahead, at, cfg);
       log.info(`Turn budget: ${fmtWait(at - t0)} in line behind ${ahead} other request(s), bucket ~${st.level.toFixed(0)}/${cfg.capacity} — more than this request may wait (${fmtWait(maxWaitMs)}), answering 429`);
       throw new TurnBudgetHold(d.reason, Math.max(d.waitMs, 15_000), st.lastThrottle);
@@ -446,11 +312,6 @@ export async function awaitTurnBudget(opts: AwaitTurnBudgetOptions = {}): Promis
   }
 }
 
-/**
- * Resolves true once this request is at the front of the line, false if `ms`
- * pass first; rejects when `signal` aborts. A real timer: the requests ahead own
- * the clock (their sleeps), and this one must leave whatever they do.
- */
 function untilFront(front: Promise<void>, ms: number, signal?: AbortSignal): Promise<boolean> {
   return new Promise<boolean>((res, rej) => {
     if (signal?.aborted) return rej(signal.reason);
@@ -485,7 +346,6 @@ async function waitForTurn(cfg: BudgetConfig, opts: AwaitTurnBudgetOptions, t0: 
         `${d.reason === "throttle hold" ? `, throttled at ${new Date(st.lastThrottle!).toISOString()}` : ""} — waiting ~${fmtWait(d.waitMs)} (${d.reason})`);
       announced = true;
     }
-    // Re-read the logs at least every 15 s: something else may be spending turns.
     await sleep(Math.min(Math.max(d.waitMs, 1000), 15_000), opts.signal);
   }
 }

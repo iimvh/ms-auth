@@ -4,12 +4,6 @@ import type { Message } from "../tools/tools.js";
 
 const log = createLogger("image-input");
 
-// Image input (vision, #39). The web client uploads a pasted image to
-// `/m365Copilot/UploadFile`, gets a `docId` back, and points the next chat
-// message at it with an `ImageFile` annotation — the same flow Microsoft's PyRIT
-// replicates (docs/hypotheses.md H8.10). The upload is keyed to the conversation.
-// The chat turn needs nothing else: no GPT-V optionsSets, and the tool agent
-// sees the image too (§33 F86).
 const UPLOAD_URL = "https://substrate.office.com/m365Copilot/UploadFile";
 
 export interface ImageAnnotation {
@@ -18,8 +12,6 @@ export interface ImageAnnotation {
   messageAnnotationType: "ImageFile";
 }
 
-/** Upload one image (a `data:image/...;base64,` URL) and return the annotation
- *  that attaches it to a chat message. */
 export async function uploadImage(token: string, conversationId: string, dataUrl: string): Promise<ImageAnnotation> {
   const type = /^data:image\/([a-z0-9.+-]+);base64,/i.exec(dataUrl)?.[1]?.toLowerCase();
   if (!type) throw new Error("not a base64 image data URL");
@@ -51,7 +43,6 @@ export async function uploadImage(token: string, conversationId: string, dataUrl
   };
 }
 
-/** The image data URLs in these messages, in order (OpenAI `image_url` parts). */
 export function imageUrls(messages: Message[]): string[] {
   return messages.flatMap((m) =>
     Array.isArray(m.content)

@@ -7,8 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 beforeEach(() => {
-  // personalDefaultModel's record path goes through the env-resolved session
-  // file; point it at a scratch file so test isolation holds.
   process.env.M365_PERSONAL_SESSION_FILE = join(mkdtempSync(join(tmpdir(), "ps-")), "s.json");
 });
 
@@ -57,7 +55,7 @@ describe("personal defaults", () => {
 
   it("personalDefaultModel with no argument reads the record's probe", () => {
     const store = new PersonalStore(process.env.M365_PERSONAL_SESSION_FILE!);
-    expect(personalDefaultModel()).toBeNull(); // no record
+    expect(personalDefaultModel()).toBeNull();
     const probe = { model: "claude-sonnet", ok: true, at: 1 };
     store.write({
       accessToken: "t", chathubPath: "p", scenario: "S", variants: "v", licenseType: "Consumer",
@@ -78,7 +76,7 @@ describe("personal defaults", () => {
 describe("personalDefaultModel follows the active account", () => {
   it("reads the ACTIVE account's probe after a switch", () => {
     delete process.env.M365_PERSONAL_MODEL;
-    delete process.env.M365_PERSONAL_SESSION_FILE; // beforeAll points it at a scratch file; the registry must win
+    delete process.env.M365_PERSONAL_SESSION_FILE;
     useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
     const rec = (model: string) => ({ accessToken: "t", chathubPath: "o@t", scenario: "S", variants: "v",
       licenseType: "Free", agentHost: "h", product: null, source: "officeweb", optionsSets: [],

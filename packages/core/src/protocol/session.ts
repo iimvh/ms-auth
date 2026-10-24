@@ -29,18 +29,8 @@ import type { TurnContext } from "../turn-context.js";
 const RS = "\x1E";
 const log = createLogger("session");
 
-// The exact frame the real m365.cloud.microsoft "Stop generating" button sends
-// (captured June 2026, scripts/cancel-frame-capture.mjs). It's a normal type:1
-// invocation with target "stop" and invocationId "1" (distinct from chat's "0"),
-// sent on the same socket; the server acks with a type:3 completion and discards
-// the partial answer. See docs/m365-copilot-api.md §6 and hypotheses.md F11.
 const STOP_FRAME = JSON.stringify({ arguments: [{}], invocationId: "1", target: "stop", type: 1 }) + RS;
 
-// Enabling these optionsSets unlocks M365's real server-side Python sandbox:
-// the model writes and EXECUTES Python and returns true results (verified with a
-// SHA-256 oracle — docs/hypotheses.md §8.9 / scripts/code-interpreter-probe.mjs).
-// Applied only on the agent-less (plain-chat) path: the tool-calling agent wants
-// the model to emit tool JSON, not run its own Python, so we leave that path
 const CODE_INTERPRETER_OPTIONS_SETS = [
   "cwc_code_interpreter",
   "cwc_code_interpreter_amsfix",
@@ -49,13 +39,6 @@ const CODE_INTERPRETER_OPTIONS_SETS = [
   "code_interpreter_matplotlib_patching",
 ];
 
-// The image-generation optionsSets, lifted verbatim from the official web client
-// capture (§14). `flux_v3` is BizChat's orchestration codename, NOT the model —
-// artifacts come back DallE-named. The GUI sends this WHOLE set on every turn and
-// lets the model pick the type from the prompt (standard / icon / story / designer
-// dimensions), which is why "draw me X" works with no UI toggle — so we match it:
-// send everything the GUI enables. Excludes only the GPT-V/upload family, which is
-// image *input* (a separate capability), not generation. `…non_watermarked_storage`
 const IMAGE_GEN_OPTIONS_SETS = [
   "cwc_flux_image",
   "cwc_flux_v3",
@@ -90,8 +73,6 @@ const ENTERPRISE_MESSAGE_TYPES = [
 // --- Optional per-request frame dumping for reverse engineering ---
 // Enabled by M365_DUMP_FRAMES=1. Every SignalR frame received is appended to a
 // per-request NDJSON file under FRAME_DIR (~/.config/opencode-m365/frames/, or
-// M365_FRAME_DIR). Cheap to run in production; gives us forensic data when M365
-// starts emitting new fields.
 const DUMP_FRAMES = !!process.env.M365_DUMP_FRAMES;
 function dumpFrame(requestId: string, parsed: unknown, direction: "recv" | "send") {
   if (!DUMP_FRAMES) return;
@@ -102,26 +83,9 @@ function dumpFrame(requestId: string, parsed: unknown, direction: "recv" | "send
       JSON.stringify({ t: Date.now(), dir: direction, frame: parsed }) + "\n",
     );
   } catch {
-    // best effort
   }
 }
 
-/**
- * Fold one incoming piece of streamed text — a token DeltaUpdate (passed as
- * `answer + writeAtCursor`) or a full-text MessageUpdate snapshot — into the
- * running answer, returning the new answer and the suffix to stream (if any).
- *
- * M365 mixes token deltas with full-text snapshots, and the first token often
- * arrives ONLY as a snapshot, so naive delta concatenation drops the head. The
- * rules:
- *  - `next` no longer than the current answer → no growth, emit nothing.
- *  - `next` extends the current answer → advance and emit the appended suffix.
- *  - `next` is longer but DIVERGES (doesn't start with the current answer, e.g. a
- *    snapshot carrying a head the deltas never sent) → adopt it as authoritative
- *    for the buffered result but emit nothing: already-streamed bytes can't be
- *    retracted, so we never stream a non-prefix (which would dup/corrupt).
- * This keeps every emitted suffix a true prefix of the final answer.
- */
 export function foldStreamText(
   answer: string,
   next: string,
@@ -131,50 +95,25 @@ export function foldStreamText(
   return { answer: next, emit: null };
 }
 
-/** The messageId a streaming `cursor` points at: `$['<id>'].adaptiveCards[0]…`. */
 export function cursorMessageId(j: string | undefined): string | null {
   const m = j?.match(/^\$\['([^']+)'\]/);
   return m ? m[1] : null;
 }
 
-/**
- * Reassemble one turn's text from M365's PER-MESSAGE stream.
- *
- * A turn can carry several bot messages (distinct messageIds): Claude narrates
- * in one and writes its tool fence in the next, and Sonnet 5 interleaves text
- * with its own tool calls. Each message streams the same way — its first token
- * usually arrives only as a snapshot that carries a `cursor` naming the message,
- * then `writeAtCursor` deltas that carry NO messageId and extend whatever the
- * cursor last named, then a final snapshot.
- *
- * Folding all of that into ONE string (what foldStreamText alone did) loses the
- * head of every message after the first: the new message's head snapshot is
- * shorter than the accumulated answer, so it is dropped, and its deltas get
- * glued onto the previous message — `…the SECRET_CODE.bash\ngrep…`, a fence
- * with no opening backticks, so the tool call never parses (#29). Every
- * multi-message turn in the Sep 28 dumps was corrupted this way.
- *
- * Messages are kept separately and composed in order of first appearance,
- * separated by a blank line (they are separate bubbles in the real client).
- */
 export class TurnTextComposer {
   private texts = new Map<string, string>();
   private target: string | null = null;
 
-  /** A cursor frame: subsequent deltas extend message `id`. */
   cursor(id: string): void {
     this.target = id;
   }
 
-  /** A full-text snapshot of one message. Before any cursor has been seen, the
-   *  snapshot's message also becomes the delta target (older frame shapes). */
   snapshot(id: string | undefined, text: string): void {
     const key = id ?? this.target ?? "";
     if (this.target === null) this.target = key;
     this.texts.set(key, foldStreamText(this.texts.get(key) ?? "", text).answer);
   }
 
-  /** A token delta for the message the cursor last named. */
   delta(text: string): void {
     const key = this.target ?? "";
     this.texts.set(key, (this.texts.get(key) ?? "") + text);
@@ -185,54 +124,24 @@ export class TurnTextComposer {
   }
 }
 
-/**
- * Attach a native custom action/plugin to a conversation and drive the confirm→invoke
- * round-trip over the WS (docs/hypotheses.md §12.6, H-NATIVE-6/7). All fields are
- * best-effort passthroughs modelled on the decompiled client; the exact inline-def
- * schema still wants a live `SEND_MSG=1` capture, so run with M365_DUMP_FRAMES=1 to
- * see what the server actually does and refine.
- */
 export interface NativeActionConfig {
-  /** Inline agent definitions (`gptDefinitions[]`) — the no-sideload agent attach. */
   gptDefinitions?: unknown[];
-  /** `clientOverrides.capabilities[]` entries (e.g. {name:"RegisteredPlugins", plugins:[…]}). */
   capabilities?: unknown[];
-  /** `plugins[]` entries ({Id, Source, Data?}). Merged even when an agent is attached. */
   plugins?: unknown[];
-  /** Approve consequential (state-mutating) actions too. Default: only read-only ones. */
   autoConfirmAll?: boolean;
 }
 
-/** Per-turn chat options. */
 export interface ChatTurnOptions {
-  /** Request server-side image generation for this turn (§14). Adds the flux
-   *  optionsSets + the GenerateGraphicArt allowedMessageType; the generated
-   *  images surface on `stream.images`. Agent-less only. */
   generateImages?: boolean;
-  /** Uploaded images this turn's message points at (image-input.ts). */
   images?: ImageAnnotation[];
 }
 
 export interface CopilotSessionOptions {
   agentId?: string;
-  /** Reuse an existing session ID across reconnections. */
   sessionId?: string;
-  /** Reuse an existing conversation ID so M365 finds the same server-side conversation. */
   conversationId?: string;
-  /**
-   * Ask M365 for a temporary chat by adding `disableMemory=1` to the Chathub URL.
-   * Temporary chats retain context for their live ConversationId but are not
-   * added to the Copilot history sidebar. Default: true.
-   */
   temporaryChat?: boolean;
-  /** Enable native custom-action support (H-NATIVE-6/7). Off = unchanged behaviour. */
   nativeActions?: NativeActionConfig;
-  /**
-   * The credential this conversation runs on, decided once by the caller
-   * (`selectCredential` in app/credential.ts). The session never reads an auth
-   * mode and never resolves an account: it carries `accountId`, `personal` and
-   * the personal `record` the caller chose.
-   */
   turnContext: (plan: TurnPlan) => TurnContext;
   accountId?: string | null;
   model?: string;
@@ -255,11 +164,6 @@ export interface TurnPlan {
   images: boolean;
 }
 
-/**
- * A persistent conversation session with M365 Copilot.
- * Reuses the same sessionId/conversationId across turns,
- * reconnecting the WebSocket for each message.
- */
 export class CopilotSession {
   private sessionId: string;
   private conversationId: string;
@@ -283,7 +187,6 @@ export class CopilotSession {
     log.info(`New session: sid=${this.sessionId}, cid=${this.conversationId}, agent=${this.agentId ?? "none"}, nativeActions=${!!this.nativeActions}, temporaryChat=${this.temporaryChat}, account=${this.accountId ?? "none"}`);
   }
 
-  /** Number of turns completed in this session */
   get turnCount(): number {
     return this._turnCount;
   }
@@ -292,11 +195,6 @@ export class CopilotSession {
     return this.accountId;
   }
 
-  /**
-   * Send a message in this conversation and stream the response.
-   * Each turn opens a fresh WebSocket with invocationId "0" (per SignalR protocol).
-   * Session/conversation IDs are reused so M365 maintains server-side context.
-   */
   chat(_token: string, text: string, model: string = this.model, signal?: AbortSignal, opts?: ChatTurnOptions): Promise<CopilotStream> {
     this._turnCount++;
     const isFirst = this._turnCount === 1;
@@ -334,34 +232,16 @@ export class CopilotSession {
       let contentOrigin: string | null = null;
       let messageType: string | null = null;
       let messageId: string | null = null;
-      // Highest per-component score across all messages this turn. The most
-      // recent score isn't necessarily the most informative — the worst one is.
       const maxScores: Record<string, number> = {};
       let turnCountServer: number | null = null;
       let turnState: string | null = null;
-      // The final type:2 item's `result` — `{value: "Success"}` normally, and
-      // `{value: "Throttled", errorCode: "PerUserThrottled", message}` when the
-      // account is rate-limited: the turn then carries NO content frames, only a
-      // BotConnection apology inside that item (#35).
       let serverResult: { value: string; errorCode?: string; message?: string } | null = null;
-      // The final item's `throttling.metering` (priority-access allowances, §24 F55).
       let metering: Record<string, number> | null = null;
-      // Generated images captured this turn (§14). Keyed by fileToken so the
-      // repeated progress snapshots for one image collapse to a single entry.
       const imagesByToken = new Map<string, CapturedImage>();
-      // Native-action round-trip state (H-NATIVE-6). `baseArgs` is the sent chat
-      // envelope's arguments[0], reused verbatim (minus `message`) to resume an
-      // action. `sawAction` records that the model triggered a custom action this
-      // turn; `actionResumed` guards against double-resuming the same trigger.
       let baseArgs: Record<string, unknown> | null = null;
       let sawAction = false;
       let actionResumed = false;
 
-      // Delta pump. The queue/state live at Promise scope (NOT inside the
-      // asyncIterator factory) so deltas that arrive between `resolve(stream)` and
-      // the consumer starting to iterate are buffered instead of dropped — the
-      // early-token loss that made true incremental streaming lossy. onDelta/onDone/
-      // onError are wired once here, so they never depend on iteration having begun.
       const queue: string[] = [];
       let streamDone = false;
       let streamError: Error | null = null;
@@ -397,9 +277,6 @@ export class CopilotSession {
         }
       };
 
-      // Pull any generated images off a bot message. The GraphicArt frame arrives
-      // repeatedly as a Progress snapshot (status climbs to 2 = ready) and again in
-      // the final type:2 item, so we upsert by fileToken and keep the readiest copy.
       const captureImages = (m: any) => {
         const list = m?.contentGenerationProgressList;
         if (!Array.isArray(list)) return;
@@ -420,8 +297,6 @@ export class CopilotSession {
         }
       };
 
-      // Fold a token delta OR a full-text snapshot into `answer` and stream the
-      // newly-appended suffix (see foldStreamText for the prefix-safe rules).
       const advance = (next: string) => {
         const r = foldStreamText(answer, next);
         if (r.answer !== answer) {
@@ -475,8 +350,6 @@ export class CopilotSession {
         [Symbol.asyncIterator]() {
           return {
             next(): Promise<IteratorResult<string>> {
-              // Drain buffered deltas BEFORE surfacing done/error, so a fast turn
-              // that finished before iteration began still yields all its text.
               if (queue.length > 0) {
                 return Promise.resolve({ value: queue.shift()!, done: false });
               }
@@ -497,11 +370,6 @@ export class CopilotSession {
       let handshakeDone = false;
       let stopped = false;
 
-      // Cancellation: when the caller's signal aborts (HTTP client disconnected),
-      // cancel the in-flight M365 turn the same way the real UI does — send the
-      // Stop frame, then let the server's type:3 ack close the socket (with a
-      // hard-close fallback). Before the handshake completes there's nothing to
-      // stop, so just close.
       const onAbort = () => {
         if (stopped) return;
         stopped = true;
@@ -645,28 +513,16 @@ export class CopilotSession {
                   source: "MOS3",
                   version: "1.0.0",
                   clientOverrides: {
-                    // The real capability channel (H8.2/H8.3/H8.7) — RegisteredPlugins,
-                    // ScenarioModels, CodeInterpreter, … ride here per the decompile.
                     capabilities: nativeActions?.capabilities ?? [],
                     "deepResearchModels@odata.type": "Collection(String)",
                   },
                 }],
               }
             : {}),
-          // Inline agent definition — attach a custom action WITHOUT sideloading
-          // through Teams/Graph (H-NATIVE-7). Best-effort schema from the decompile;
-          // run with M365_DUMP_FRAMES=1 to see what the server accepts.
           ...(nativeActions?.gptDefinitions ? { gptDefinitions: nativeActions.gptDefinitions } : {}),
-          // plugins[]: an explicit native-action list wins; otherwise Bing on the
-          // plain (agent-less) path only, exactly as before.
           ...(nativeActions?.plugins
             ? { plugins: nativeActions.plugins }
             : (!agentId ? { plugins: [{ Id: "BingWebSearch", Source: "BuiltIn" }] } : {})),
-          // Skill flags that gate the action/confirmation flow — the real client
-          // sends these in the chat payload (bundle 8af68b68f4a2 destructure at
-          // :9373-9378 → payload :11111). Without them the server has no reason to
-          // run the confirmation-dialog / auto-invoke skills, so an attached action
-          // never triggers. Only sent on the native-action path.
           ...(nativeActions
             ? {
                 enableConfirmationDialogSkill: true,
@@ -711,12 +567,6 @@ export class CopilotSession {
         resolve(stream);
       };
 
-      // When the model triggers a native custom action, the server sends a
-      // confirmation TRIGGER (an adaptive card) and waits for us to approve it on
-      // THIS socket. We reuse the exact chat envelope (baseArgs) with a
-      // ResumeInvokeAction message, so the server-side orchestrator makes the real
-      // outbound call (H-NATIVE-6). Returns true if it sent a resume (⇒ keep socket
-      // open for the result). No-op unless native actions are enabled.
       const maybeResumeAction = (m: unknown): boolean => {
         if (!nativeActions || actionResumed || !baseArgs) return false;
         const conf = parseActionConfirmation(m as any);
@@ -762,8 +612,6 @@ export class CopilotSession {
         }
 
         if (base.type === 2) {
-          // Stream item — the FINAL state of the conversation, with authoritative
-          // throttle/turnCount/scores. Mine it before closing.
           const item = (raw as { item?: { messages?: any[]; throttling?: any; turnState?: string; result?: { value?: unknown; errorCode?: unknown; message?: unknown } } }).item;
           if (item) {
             if (typeof item.result?.value === "string") {
@@ -802,9 +650,6 @@ export class CopilotSession {
               }
               if (maybeResumeAction(m)) resumedHere = true;
             }
-            // If the model just triggered a custom action, this "final" item isn't
-            // final — we sent a ResumeInvokeAction and must keep the socket open to
-            // receive the action's result (H-NATIVE-6).
             if (resumedHere) return;
           }
           ws.close();
@@ -822,13 +667,9 @@ export class CopilotSession {
 
             const msgUpdate = MessageUpdate.safeParse(arg);
             if (msgUpdate.success) {
-              // A cursor names the message that the following deltas extend.
               const cursorId = cursorMessageId(msgUpdate.data.cursor?.j);
               if (cursorId) composer.cursor(cursorId);
               for (const m of msgUpdate.data.messages) {
-                // Capture diagnostic meta from every bot message — including the
-                // control-typed ones — so callers can tell apart `DeepLeo` from
-                // `3PDeclarativeAgent` and surface `Disengaged` cleanly.
                 if (m.author === "bot") {
                   captureImages(m);
                   if (m.contentOrigin) contentOrigin = m.contentOrigin;
@@ -843,9 +684,6 @@ export class CopilotSession {
                   }
                   if (typeof m.turnCount === "number") turnCountServer = m.turnCount;
                   if (m.turnState) turnState = m.turnState;
-                  // A confirmation TRIGGER for a native action arrives here as a
-                  // messageType'd bot frame (which the plain-chat path drops). Detect
-                  // it and auto-approve on the same socket (H-NATIVE-6).
                   maybeResumeAction(m);
                 }
                 if (m.author === "bot" && m.text && !m.messageType) {

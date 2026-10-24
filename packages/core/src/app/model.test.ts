@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TurnBudgetHold } from "../budget/turn-budget.js";
 
-// ModelSession.run's reconnect: when the first chat() fails it sends the turn
-// again on a fresh CopilotSession, and that turn waits on the budget like any
-// other (#77). The CopilotSession is faked: each chat() is one upstream turn.
 const wire = vi.hoisted(() => ({
   events: [] as string[],
   turnOpts: [] as Array<{ generateImages: boolean } | undefined>,

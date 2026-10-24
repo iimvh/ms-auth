@@ -16,10 +16,10 @@ describe("parsePersonalCapture", () => {
     expect(c.chathubPath).toBe("oid-1@tid-1");
     expect(c.scenario).toBe("OfficeWebPaidConsumerCopilot");
     expect(c.variants).toBe("a,b");
-    expect(c.source).toBe("officeweb");           // quotes stripped
+    expect(c.source).toBe("officeweb");
     expect(c.optionsSets).toEqual(["enable_msa_user"]);
     expect(c.allowedMessageTypes).toEqual(["Chat"]);
-    expect(c.expiresAt).toBe(1_700_000_000_000);  // JWT exp in ms
+    expect(c.expiresAt).toBe(1_700_000_000_000);
   });
 
   it("ignores non-chat frames and rejects a capture with no chat frame", () => {
@@ -107,7 +107,6 @@ describe("frameText hardening", () => {
     expect(frameText(Buffer.from('{"a":1}\x1e'))).toBe('{"a":1}\x1e');
   });
 });
-
 
 describe("frameText — Playwright's { payload } shape", () => {
   it("unwraps a text payload", () => {

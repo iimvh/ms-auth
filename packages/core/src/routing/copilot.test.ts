@@ -28,9 +28,6 @@ const INCLUDED = { scenario: "OfficeWebIncludedCopilot", licenseType: "Starter" 
 const PAID = { scenario: "OfficeWebPaidCopilot", licenseType: "Premium" };
 
 describe("Sonnet routing — one tone, two models", () => {
-  // `Claude_Sonnet` is Sonnet 4.6 on the included scenario and Sonnet 5.5 on
-  // the paid one; `Claude_Sonnet_5` is Sonnet 5 on the paid one and Sonnet 4.6
-  // on the included one (tone-probe 2026-10-06), so the model ID has to pick.
   afterEach(() => {
     delete process.env.M365_SCENARIO;
   });
@@ -56,7 +53,6 @@ describe("Sonnet routing — one tone, two models", () => {
   });
 
   it("does NOT move the Claude_Sonnet tone itself onto the paid scenario", () => {
-    // That would silently turn `claude-sonnet` into Sonnet 5.5 as well.
     expect(getScenarioForTone("Claude_Sonnet")).toEqual(INCLUDED);
   });
 
@@ -88,7 +84,7 @@ describe("Sonnet routing — one tone, two models", () => {
 
   it("never treats a non-Sonnet tone as Sonnet 5 or 5.5, whatever the string says", () => {
     expect(isSonnet5Model("claude-opus-5")).toBe(false);
-    expect(isSonnet5Model("gpt-sonnet-5")).toBe(false); // resolves to magic, not a Claude tone
+    expect(isSonnet5Model("gpt-sonnet-5")).toBe(false);
     expect(isSonnet55Model("gpt-sonnet-5.5")).toBe(false);
   });
 
@@ -114,8 +110,6 @@ describe("GPT-5.6 model routing", () => {
   });
 
   it("maps both chat IDs to Gpt_5_6_Chat, mirroring the GPT-5.5 naming", () => {
-    // The web client calls this one "GPT 5.6 Quick response", so `-quick` is
-    // the alias a user reaches for; bare `gpt-5.6` follows `gpt-5.5`.
     expect(getToneForModel("gpt-5.6")).toBe("Gpt_5_6_Chat");
     expect(getToneForModel("gpt-5.6-quick")).toBe("Gpt_5_6_Chat");
     expect(getAvailableModels()).toContain("gpt-5.6");
@@ -123,9 +117,6 @@ describe("GPT-5.6 model routing", () => {
   });
 
   it("requests NO paid scenario for the chat tone — it serves on the included one", () => {
-    // It was entitlement-gated (BotConnection on included, DeepLeo on paid),
-    // which §12.15 misread as a dead route. The gate has since lifted, so
-    // asking for the paid scenario here would be a bypass attempt, not a fix.
     expect(getScenarioForTone("Gpt_5_6_Chat")).toEqual({
       scenario: "OfficeWebIncludedCopilot",
       licenseType: "Starter",
@@ -140,9 +131,6 @@ describe("GPT-6 routing", () => {
   });
 
   it("advertises no chat variant — Gpt_6_Chat is rejected by the validator", () => {
-    // A rejected tone must never be reachable: it errors the whole turn rather
-    // than degrading to prose, so shipping an ID that resolves to it would be a
-    // model that can only ever fail.
     const advertisedTones = getAvailableModels().map(getToneForModel);
     expect(advertisedTones).not.toContain("Gpt_6_Chat");
   });
@@ -207,7 +195,6 @@ describe("GPT-6 Sol routing (#23)", () => {
   });
 
   it("won't mark a route dead once it has answered — a later InternalError is a transient", () => {
-    // A premium account produced the dead route's exact wire state mid-conversation (§23).
     noteAgentRouteAlive("Gpt_6_Sol_Reasoning");
     expect(isAgentRouteAlive("Gpt_6_Sol_Reasoning")).toBe(true);
     expect(noteAgentRouteDead("Gpt_6_Sol_Reasoning")).toBe(false);
@@ -270,7 +257,6 @@ describe("Opus routing", () => {
   });
 
   it("routes an unmapped Opus string to Opus rather than downgrading to Sonnet", () => {
-    // What a Claude Code client actually sends: Opus 5 with a context suffix.
     expect(getToneForModel("claude-opus-5[1m]")).toBe("Claude_Opus");
   });
 
@@ -279,7 +265,6 @@ describe("Opus routing", () => {
   });
 
   it("sends claude-opus-4.8 to the shared tone under the INCLUDED scenario (Opus 4.8)", () => {
-    // claude-opus-4.5 is the legacy ID of the same route (Opus 4.5 until October 2026, §36).
     for (const id of ["claude-opus-4.8", "claude-opus-4.5"]) {
       expect(INCLUDED_SCENARIO_MODELS.has(id)).toBe(true);
       expect(isIncludedOpusModel(id)).toBe(true);
@@ -292,7 +277,6 @@ describe("Opus routing", () => {
       expect(isIncludedOpusModel(id)).toBe(false);
       expect(getScenarioForModel(id)).toEqual(PAID);
     }
-    // The tone itself stays paid; only the model ID opts out.
     expect(getScenarioForTone("Claude_Opus")).toEqual(PAID);
   });
 
@@ -323,7 +307,6 @@ describe("Opus routing", () => {
       expect(requestUsesAgent(id, false)).toBe(false);
       expect(requestUsesAgent(id, true)).toBe(true);
     }
-    // Unchanged for everything else: tool-less requests go agent-less.
     expect(requestUsesAgent("gpt-5.5", false)).toBe(false);
     expect(requestUsesAgent("claude-sonnet", true)).toBe(false);
   });
@@ -370,8 +353,6 @@ describe("Opus routing", () => {
   });
 });
 
-// Tones the live validator REJECTS — every one errored `Failed to invoke 'Chat'`
-// in all 3 runs of the 2026-09-28 tone-probe sweep (docs/hypotheses.md §19).
 const REJECTED_TONES = [
   "Gpt_Quick", "Gpt_Chat", "Gpt_Reasoning",
   "Gpt_5_2_Quick", "Gpt_5_3_Quick", "Gpt_5_4_Quick",
@@ -380,8 +361,6 @@ const REJECTED_TONES = [
 
 describe("retired Quick tones", () => {
   it("never resolves an advertised model to a tone the validator rejects", () => {
-    // A rejected tone errors the whole turn, so an ID that resolves to one is a
-    // model that can only ever fail.
     const advertisedTones = getAvailableModels().map(getToneForModel);
     for (const tone of REJECTED_TONES) expect(advertisedTones).not.toContain(tone);
   });
@@ -396,7 +375,6 @@ describe("retired Quick tones", () => {
     expect(getToneForModel("gpt-5.3-quick")).toBe("Gpt_5_3_Chat");
     expect(getToneForModel("gpt-5.2")).toBe("Gpt_5_2_Chat");
     expect(getToneForModel("gpt-5.2-quick")).toBe("Gpt_5_2_Chat");
-    // Bare gpt-5.4 was never a Quick tone and stays on reasoning.
     expect(getToneForModel("gpt-5.4")).toBe("Gpt_5_4_Reasoning");
   });
 

@@ -5,8 +5,7 @@ import { createLogger, fileLoggingEnabled, LOG_PATH } from "../io/log.js";
 
 const log = createLogger("turn-budget");
 
-//
-// The model (F58): the account holds a bucket of ~100 turns that refills at
+// The throttle model is written up in docs/hypotheses.md (§24 F58, §37).
 
 export interface BudgetConfig {
   capacity: number;

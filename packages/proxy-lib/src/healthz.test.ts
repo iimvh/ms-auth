@@ -44,6 +44,6 @@ describe("/healthz", () => {
     useMockRegistry([{ id: "only" }]);
     const payload = await buildHealthzPayload();
     expect(payload).toMatchObject({ status: "ok", authMode: "msal", credential: { applicable: false } });
-    expect(payload.accounts.activeId).toBeTruthy(); // the registry, when there is one
+    expect(payload.accounts.activeId).toBeTruthy();
   });
 });

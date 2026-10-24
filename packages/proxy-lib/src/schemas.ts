@@ -1,8 +1,6 @@
 import { z } from "zod/v4";
 import { isPersonalMode, personalDefaultModel } from "@m365-copilot/core";
 
-// --- OpenAI Request Schemas ---
-
 export const ToolCallFunction = z.object({
   name: z.string(),
   arguments: z.string(),
@@ -24,10 +22,6 @@ export const ToolDefinition = z.object({
 });
 
 export const ChatMessage = z.object({
-  // `developer` is OpenAI's reasoning-model role — it replaces `system` for o1/
-  // gpt-5-class reasoning models, and clients like Hermes emit it when pointed at
-  // a `*-think-deeper` model. Accept it and normalize to `system` so every
-  // downstream consumer only ever sees the four canonical roles.
   role: z.enum(["system", "developer", "user", "assistant", "tool"]).transform(
     (r) => (r === "developer" ? "system" : r),
   ),
@@ -37,7 +31,6 @@ export const ChatMessage = z.object({
       z.object({
         type: z.string(),
         text: z.string().optional(),
-        // OpenAI image parts (pi sends a read image as a data URL): kept for image input.
         image_url: z.object({ url: z.string() }).passthrough().optional(),
       }),
     ),
@@ -48,16 +41,9 @@ export const ChatMessage = z.object({
 });
 
 export const ChatCompletionRequest = z.object({
-  // Default when the client sends no model. An explicit reasoning tone is a more
-  // reliable default than `m365-copilot` (the `magic` auto-router), which is
-  // high-variance at turn-1 tool-calling (see docs/hypotheses.md F24 + correction:
-  // magic swung 0/2 → 2/2 across probes; explicit tones pin a specific backend).
-  // Personal mode instead answers with the model the login probe got an answer
-  // from — the enterprise default may not serve a consumer scenario at all.
   model: z.string().optional().default(() => (isPersonalMode() ? personalDefaultModel() : null) ?? "gpt-5.5-think-deeper"),
   messages: z.array(ChatMessage).min(1),
   stream: z.boolean().optional().default(false),
-  // OpenAI streaming option: include_usage=true → emit a final chunk with `usage`.
   stream_options: z.object({ include_usage: z.boolean().optional() }).optional(),
   temperature: z.number().optional(),
   max_tokens: z.number().optional(),

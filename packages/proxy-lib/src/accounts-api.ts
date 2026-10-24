@@ -19,33 +19,16 @@ import {
   type RegistryStatus,
 } from "@m365-copilot/core";
 
-/**
- * The account-management API (spec §7.5), as pure functions over injected deps
- * so the routes are thin and this is testable without a Nitro server.
- *
- * Every route answers 404 in enterprise (MSAL) mode: there are no personal
- * accounts to manage there, and a 404 is the least surprising answer for a
- * feature that does not exist in that deployment.
- */
-
 export interface AccountHealthView extends AccountView {
-  /** The account's own credential state (its record + its Chrome), or null
-   *  when the probe could not run. */
   credential: PersonalHealth | null;
-  /** Set when the account shares an identity with another one (one budget). */
   warning: string | null;
-  /** A conversation opened on this account is still in the pool (so it cannot
-   *  be deleted yet, and the dashboard shows why). */
   accountIdLive: boolean;
 }
 
 export interface AccountsDeps {
   pool: { liveAccountIds(): string[]; forgetAccount(id: string): number };
   now?: () => number;
-  /** How long a CDP probe is reused, so a dashboard's refresh loop does not
-   *  open a socket per account per second. */
   healthCacheMs?: number;
-  /** The CDP probe, injected so tests never touch a real port. */
   probeCdp?: (url: string) => Promise<boolean>;
 }
 
@@ -61,12 +44,9 @@ export interface AccountsListBody {
 
 const DEFAULT_HEALTH_CACHE_MS = 10_000;
 
-// --- The 10 s probe cache ---
-
 interface CacheEntry { at: number; url: string; value: PersonalHealth }
 const healthCache = new Map<string, CacheEntry>();
 
-/** Only for tests: forget every cached probe. */
 export function resetAccountsHealthCache(): void {
   healthCache.clear();
 }
@@ -74,13 +54,10 @@ export function resetAccountsHealthCache(): void {
 async function healthOf(accountId: string, deps: AccountsDeps): Promise<PersonalHealth | null> {
   const now = (deps.now ?? Date.now)();
   const cacheMs = deps.healthCacheMs ?? DEFAULT_HEALTH_CACHE_MS;
-  // The account's own paths, whatever the env says about the active one.
   const resolved = resolveAccount({ id: accountId });
   const cached = healthCache.get(accountId);
   if (cached && cached.url === resolved.cdpUrl && now - cached.at < cacheMs) return cached.value;
   const d: Partial<PersonalHealthDeps> = { now: () => now };
-  // personalHealth keys its record and CDP probe off resolveAccount(), i.e. the
-  // ACTIVE account; a listed account may not be that one, so give it its own.
   if (deps.probeCdp) d.probeCdp = deps.probeCdp;
   if (accountId !== resolveAccount().id) {
     d.store = new PersonalStore(resolved.sessionFile);
@@ -95,9 +72,6 @@ async function healthOf(accountId: string, deps: AccountsDeps): Promise<Personal
   }
 }
 
-// --- Helpers ---
-
-/** Whether that account is serving a conversation right now. */
 export function isAccountLive(deps: AccountsDeps, id: string): boolean {
   return deps.pool.liveAccountIds().includes(id);
 }
@@ -106,7 +80,6 @@ function errorBody(code: string, message: string, hint?: string, extra?: Record<
   return { error: { code, message, ...(hint ? { hint } : {}), ...extra } };
 }
 
-/** `true` while any conversation of that account is still in the pool. */
 function labelProblem(label: unknown): string | null {
   if (typeof label !== "string") return "label must be a string";
   if (!label.trim()) return "label must not be empty";
@@ -114,10 +87,6 @@ function labelProblem(label: unknown): string | null {
   return null;
 }
 
-/**
- * Run a route body, mapping `AccountError` to its HTTP status and anything
- * unexpected to a 500 (rather than letting it escape as a Nitro HTML page).
- */
 export async function toRouteResult(fn: () => RouteResult | Promise<RouteResult>): Promise<RouteResult> {
   try {
     return await fn();
@@ -126,15 +95,13 @@ export async function toRouteResult(fn: () => RouteResult | Promise<RouteResult>
       const status =
         err.code === "invalid_id" ? 400
           : err.code === "not_found" ? 404
-            : 409; // already_exists | active | last_account | registry_invalid
+            : 409;
       return { status, body: errorBody(err.code, err.message, err.hint) };
     }
     const message = err instanceof Error ? err.message : String(err);
     return { status: 500, body: errorBody("internal", message) };
   }
 }
-
-// --- Routes ---
 
 export async function listAccounts(deps: AccountsDeps): Promise<AccountsListBody> {
   const views = accountViews();
@@ -165,8 +132,6 @@ export async function accountsAddResponse(
     if (bad) return { status: 400, body: errorBody("invalid_label", bad) };
     const id = typeof input.id === "string" ? input.id.trim() : "";
     if (!id) return { status: 400, body: errorBody("invalid_id", "id is required") };
-    // addAccount validates the id shape and the duplicate; readRegistry's own
-    // failures come back as AccountError("registry_invalid").
     const created = addAccount(id, (input.label as string).trim());
     return {
       status: 201,
@@ -208,12 +173,6 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
   if (!isPersonalMode()) {
     return { result: { status: 404, body: errorBody("not_found", "account management requires personal auth mode") }, forgotten: 0 };
   }
-  // Before touching the registry: a conversation opened on this account cannot
-  // be re-keyed onto another identity, and removing the entry would strand it.
-  // A conversation stays in the pool until it has been idle past
-  // M365_SESSION_IDLE_MS (60 min by default), so the honest instruction is to
-  // switch the client to another account (or stop using that thread) and let
-  // the idle sweep let it go — the page cannot finish it.
   if (isAccountLive(deps, id)) {
     return {
       result: {
@@ -230,7 +189,6 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
   }
   try {
     removeAccount(id);
-    // Its pool state is now stale (a re-created id must not inherit it).
     const forgotten = deps.pool.forgetAccount(id);
     return { result: { status: 200, body: { removed: id, forgotten } }, forgotten };
   } catch (err) {
@@ -238,7 +196,6 @@ export function accountsDeleteResponse(id: string, deps: AccountsDeps): { result
   }
 }
 
-/** The synchronous twin of toRouteResult, for the routes that do no I/O. */
 function synchronously(err: unknown, _ok: () => RouteResult): RouteResult {
   if (err instanceof AccountError) {
     const status = err.code === "invalid_id" ? 400 : err.code === "not_found" ? 404 : 409;
@@ -247,5 +204,4 @@ function synchronously(err: unknown, _ok: () => RouteResult): RouteResult {
   return { status: 500, body: errorBody("internal", err instanceof Error ? err.message : String(err)) };
 }
 
-/** `chathubOid` re-exported for the UI, which shows the identity per account. */
 export { chathubOid, loginCommandFor };

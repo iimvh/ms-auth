@@ -1,24 +1,14 @@
 import { isPersonalMode, personalHealth, registryStatus, type PersonalHealth } from "@m365-copilot/core";
 
-/**
- * The `/healthz` payload (spec §7.8). Personal mode reports the ACTIVE account's
- * credential state and how many accounts the registry holds; enterprise keeps
- * the shape it has always had, with `accounts` added and `credential` marked
- * not applicable.
- *
- * It never throws: a broken registry must show up as a report, not a 500 on the
- * one endpoint an operator uses to find out what is wrong.
- */
+// /healthz must not mint or spend a turn; a design constraint.
 export interface HealthzPayload {
   status: "ok";
   authMode: "msal" | "personal";
   credential: PersonalHealth | { applicable: false };
   accounts: {
-    /** The registry file the counts below came from (§7.9). */
     path: string;
     count: number;
     activeId: string | null;
-    /** `registry` when accounts.json decided it, `builtin` when it fell back. */
     repository: "registry" | "builtin";
     problem?: { code: string; detail: string; hint: string };
   };
@@ -29,14 +19,10 @@ export async function buildHealthzPayload(deps: { probeCdp?: (url: string) => Pr
   if (!isPersonalMode()) {
     return { status: "ok", authMode: "msal", credential: { applicable: false }, accounts };
   }
-  // `undefined` must not be passed over the defaults: personalHealth merges its
-  // partial into them, so an explicit probeCdp: undefined would erase the real
-  // probe and throw on the first request.
   const health = await personalHealth(deps.probeCdp ? { probeCdp: deps.probeCdp } : {});
   return { status: "ok", authMode: "personal", credential: health, accounts };
 }
 
-/** The registry's view, degrading to a readable report instead of throwing. */
 function safeRegistryStatus(): HealthzPayload["accounts"] {
   try {
     const st = registryStatus();

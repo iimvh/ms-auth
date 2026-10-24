@@ -53,11 +53,6 @@ import type { z } from "zod/v4";
 
 const log = createLogger("handler");
 
-// Render generated images (§14) as markdown so any OpenAI-compatible client shows
-// them inline. The artifact URL 401s without the designerappservice token, so we
-// fetch the bytes ourselves and embed a self-contained data URI — a bare URL would
-// be useless to the client. On fetch failure we fall back to the raw URL so the
-// response is never silently empty.
 async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
   if (images.length === 0) return "";
   let artifactToken: string | null = null;
@@ -78,42 +73,22 @@ async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
   return parts.join("\n\n");
 }
 
-// Forcing follow-up sent (in the same conversation) when M365 confabulates an
-// inability to act instead of calling a tool. See the confab-retry loop below.
 const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
-// The same give-up AFTER the model has already run tools. CONFAB_FORCE_PROMPT
-// says "you have not run any command yet" — false at that point, and the model
-// treats a prompt that contradicts its own transcript as untrustworthy: live
-// (Windows / pi / gpt-5.6-think-deeper) it answered "so I can't run `ls -la` or
-// `cat`", refusing the prompt's own instruction. The give-ups that reach here
-// follow an obstacle — no PDF tool or Word library installed — so say what is
-// true: the tools work, and a missing program is something to install.
 const MIDTASK_FORCE_PROMPT =
   "Your tools are working: your previous command really ran on this machine, and its real output is in the last <tool_response>. Continue the task from there with ONE tool block for the next step. A missing program or library is not a missing tool — install it with the package manager (pip, npm, …) or do the job with what is already installed. Output only the tool block, nothing else.";
 
-// Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
 
-// A Teams artifact belongs to M365's remote runtime and cannot be applied by a
-// local agent using only its basename. Force the intended mutation through the
-// harness tools instead of letting the remote patch leak into the conversation.
 const REMOTE_ARTIFACT_FORCE_PROMPT =
   "The patch or download link you produced exists only in M365's remote environment and is NOT a file in the caller's working directory. Do NOT create, download, or apply a patch, and do NOT use a Teams artifact link. Use the provided local edit/write tool directly; if needed, emit ONE ```bash block that modifies the named local file in place. Output only that single local tool call, nothing else.";
 
-// M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
-// CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
-// back clean-looking but incomplete with no error to detect (docs/hypotheses.md
-// F9). We can't see token counts, so we heuristically flag responses at/over the
-// observed ceiling with finish_reason:"length" — the standard signal a harness
-// uses to ask for a continuation. Tune/disable via env (0 disables).
 const OUTPUT_CHAR_CEILING = process.env.M365_OUTPUT_CHAR_CEILING !== undefined
   ? Number(process.env.M365_OUTPUT_CHAR_CEILING)
   : 12_000;
 
-/** "length" when the answer is at/over the empirical output ceiling, else "stop". */
 function outputFinishReason(text: string): "stop" | "length" {
   if (OUTPUT_CHAR_CEILING > 0 && text.length >= OUTPUT_CHAR_CEILING) {
     log.info(`Output at ceiling (${text.length} ≥ ${OUTPUT_CHAR_CEILING} chars) — finish_reason=length (likely truncated; harness should continue)`);
@@ -122,65 +97,27 @@ function outputFinishReason(text: string): "stop" | "length" {
   return "stop";
 }
 
-/** How many chars of a model-written <tool_response> tail a tool turn may run
- *  before the proxy stops it (runBuffered). 0 stops at the tag itself. With the
- *  default, pi takes as many turns as when the turn runs to its end (+2%,
- *  p = 0.74), and no runaway gets far; stopping at the tag cost 10% more turns
- *  (hypotheses §35 F89). */
 const DEFAULT_EARLY_STOP_AFTER = 2_000;
 function earlyStopAfter(): number {
   const v = Number(process.env.M365_EARLY_STOP_AFTER);
   return process.env.M365_EARLY_STOP_AFTER !== undefined && Number.isFinite(v) && v >= 0 ? v : DEFAULT_EARLY_STOP_AFTER;
 }
 
-/** The longest M365_AVOID_THROTTLING holds a request that isn't streamed: it
- *  sends nothing until the answer, and its clients give up on headers after
- *  5 min (pi's SDK, the bench), of which a turn itself can take ~3. A streamed
- *  request has its keepalive chunks and waits up to M365_BUDGET_MAX_WAIT_MIN. */
 const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
-// --- Per-conversation state ---
-
 interface ConversationState {
   session: ModelSession;
   sentMessageCount: number;
   lastAccessedAt: number;
-  /** Sent ahead of the next tool result when the proxy executed less than the
-   *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
-  /** The last completed turn started from a reset conversation (a fresh
-   *  newConversation(), or the pool's own reset), so its sentMessageCount is a
-   *  baseline: the next request at that same length continues it. */
   lastSentIsReset: boolean;
-  /** The model that last answered in this conversation. A different one (the
-   *  Opus fallback, #18) can't continue the M365 conversation — it may need
-   *  another scenario — so it starts a fresh one with the full history. */
   servedModel?: string;
-  /**
-   * The personal account whose token opened this conversation (§7.6): a
-   * conversation belongs to ONE account for its whole life. It is part of the
-   * fingerprint (so the same opener under two accounts is two conversations)
-   * and it is never changed on reuse — a thread opened on `default` must not
-   * silently continue on `work` just because the active account switched.
-   */
   accountId: string | null;
 }
 
-/**
- * The note that corrects the model's view of what actually ran.
- *
- * When the proxy executes only part of a reply — the head before a self-written
- * `<tool_response>` (the stop sequence), the first of several batched calls, or
- * the call at the head of a reply that kept going (#33) — M365's
- * server-side history still holds the WHOLE reply. The model then believes its
- * invented results happened, often including an invented "done", and reads the
- * real result as stale: "It looks like this tool response came in out of
- * context" (Sonnet 4.6: 9 of 56 bench runs ended that way without this note,
- * 0 of 70 with it; #31).
- */
 const TRAILING_NOTE_CHARS = 120;
 export function executedOnlyFirstNote(fabricated: boolean, droppedCalls: number, trailingChars = 0): string | null {
   if (fabricated) {
@@ -198,22 +135,6 @@ export function executedOnlyFirstNote(fabricated: boolean, droppedCalls: number,
   return null;
 }
 
-// --- Session pool: maps conversation fingerprint → M365 session ---
-
-/**
- * How long a conversation no request has continued may idle before the pool
- * forgets it. Read per request (`M365_SESSION_IDLE_MS`), like the framing switch.
- *
- * This was 30 minutes, and a live pi session that idled longer — a human reading
- * the last diff — came back to a dropped `ModelSession` and a fresh M365
- * conversation: same harness history (it re-sends everything), but the
- * conversation's continuity gone, and (docs/architecture-handoff.md item 1) a live
- * session must not be abandoned on the clock. 60 minutes is the TTL: past it,
- * turns already took the delta path instead of the full prompt, so a
- * re-discovered session could continue on a history the new conversation never
- * received — forgetting is the safe end. The conversation is not lost: the
- * harness re-sends the full history, so the next turn re-opens it from scratch.
- */
 const DEFAULT_SESSION_IDLE_MS = 60 * 60 * 1000;
 
 export class SessionPool {
@@ -229,12 +150,6 @@ export class SessionPool {
     this.sessionOptions = sessionOptions;
   }
 
-  /**
-   * Resolve the conversation state for an incoming request.
-   * Fingerprint is the hash of the account, the first user message and the
-   * request's tool names — same account, same opener and same tool set = the
-   * same conversation. `accountId` null/undefined = the builtin layout.
-   */
   resolve(messages: ParsedMessage[], tools?: ChatBody["tools"], accountId?: string | null): ConversationState {
     this.evictStale();
 
@@ -244,23 +159,6 @@ export class SessionPool {
 
     if (existing) {
       const before = existing.sentMessageCount;
-      // A request that carries no more messages than this conversation already
-      // sent is not its continuation (a harness re-sends the whole history and
-      // only ever appends). It's a new session that shares the first user message
-      // — two pi sessions opened with the same prompt, even in different
-      // directories — or a re-sent request. Either way it needs a FRESH M365
-      // conversation: reset() kept the conversationId, so the full prompt went
-      // into the old thread, and at equal length nothing reset at all and
-      // "Please continue." went there. Measured (Windows / pi, 30 runs of 2
-      // prompts): later sessions answered from earlier ones — "notlar.docx was
-      // already created and verified" in an empty directory — and the pass rate
-      // fell 7/10 → 4/10 → 3/10 over the sweep. The full prompt re-sends the
-      // whole history, so nothing the harness holds is lost.
-      // A baseline rather than "the last request sent": the turn after a reset
-      // sends the full prompt and opens the conversation the reset began, so a
-      // request at that same length is that conversation's — not a new session
-      // that happens to share the opener. (The model-switch path owns its own
-      // reset flag; here the turn sends the full prompt.)
       if (messages.length <= before && !existing.lastSentIsReset) {
         log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${before} sent), starting a fresh M365 conversation`);
         existing.session.newConversation();
@@ -268,23 +166,13 @@ export class SessionPool {
         existing.lastSentIsReset = true;
         existing.pendingNote = null;
       } else {
-        // A genuine continuation touches the clock; a re-sent request or a
-        // keep-alive (opencode repeats the opener with nothing new) must not
-        // keep a conversation the idle sweep would otherwise forget alive
-        // forever. The turn's own duration is not idleness either, which is why
-        // the clock is set again when the turn ends.
         existing.lastAccessedAt = Date.now();
       }
       return existing;
     }
 
-    // New conversation
     log.info(`New conversation ${fingerprint}${account ? ` account=${account}` : ""}, ${this.conversations.size} active`);
     const state: ConversationState = {
-      // The account is pinned into the session at birth: every turn of this
-      // conversation resolves its token AND its record from THIS id, so a
-      // switch of the active account mid-thread cannot pair one account's token
-      // with another's captured params (§7.2).
       session: new ModelSession({ ...this.sessionOptions, accountId: account }),
       sentMessageCount: 0,
       lastSentIsReset: false,
@@ -296,28 +184,13 @@ export class SessionPool {
     return state;
   }
 
-  // The tool names are in the key because a harness's side requests can share
-  // the session's first user message. opencode sends a title request ("You are
-  // a title generator…", no tools) 4 ms before the task (12 tools): keyed on the
-  // opener alone both went into one M365 conversation, as turns 0 and 1 run at
-  // the same time (#83). pi's and opencode's tool sets don't change within a
-  // session; one that does starts a fresh conversation with the full history,
-  // which costs a thread, not the answer. Names, not definitions: descriptions
-  // can carry per-turn text. The system prompt would separate the title request
-  // too, but it is the likelier place for a date, a time or a git status.
   private fingerprint(messages: ParsedMessage[], tools?: ChatBody["tools"], accountId?: string | null): string {
     const firstUser = messages.find(m => m.role === "user");
     const text = firstUser ? getMessageContent(firstUser) : "";
     const toolNames = [...new Set((tools ?? []).map(t => t.function.name))].sort().join(",");
-    // The account comes FIRST: two accounts can get the same first message from
-    // the same harness (a task opened twice, a retry after switching), and that
-    // must be two M365 conversations, keyed to two different identities. The
-    // null (builtin) key is the empty string, so a single-account setup hashes
-    // exactly what it hashed before this change.
     return simpleHash(`${accountId ?? ""}\n${toolNames}\n${text}`);
   }
 
-  /** The accounts that still hold a conversation in this pool (null excluded). */
   liveAccountIds(): string[] {
     const ids = new Set<string>();
     for (const state of this.conversations.values()) {
@@ -326,11 +199,6 @@ export class SessionPool {
     return [...ids];
   }
 
-  /**
-   * Forget every conversation opened on one account — used when that account is
-   * removed, so a later account that reuses the id cannot inherit a live
-   * session. Returns how many conversations were dropped.
-   */
   forgetAccount(accountId: string): number {
     let dropped = 0;
     for (const [key, state] of this.conversations) {
@@ -367,24 +235,6 @@ function simpleHash(str: string): string {
   return String(hash);
 }
 
-/** Parse a tool-mode reply, with the document guard applied.
- *
- *  The shell-routing parser turns every ```bash block into a tool call, so a
- *  model that ANSWERS with a markdown document full of code fences ("here's a
- *  simplified README") would get its own answer executed as shell. That shape
- *  (multiple fences + prose) comes back as plain text instead — unless the reply
- *  OPENS with a tool call, which makes it an action with a speculative tail (#33).
- *
- *  This runs BEFORE the give-up checks, because a document runs nothing. It used
- *  to run after them, so a refusal that came with "run these yourself" fences —
- *  measured: "Dosya oluşturma özelliği bu oturumda devre dışı olduğu için
- *  notlar.pdf dosyasını oluşturamıyorum" + two ```bash blocks — counted as tool
- *  calls for the confabulation check (skipped), then as text for the user.
- *
- *  `judged` is the text the give-up checks read. For a document it's only the
- *  opening paragraph: a give-up announces itself there, and everything after
- *  is document content ("if you can't access the API…") that must not trip a
- *  forcing retry. */
 function parseReply(text: string, tools: Parameters<typeof parseToolCalls>[1]): { parsed: ParseResult; judged: string | null } {
   const parsed = parseToolCalls(text, tools);
   if (isProseDocument(parsed, text, tools)) {
@@ -395,25 +245,14 @@ function parseReply(text: string, tools: Parameters<typeof parseToolCalls>[1]): 
   return { parsed, judged: parsed.textContent };
 }
 
-// --- Delta message formatting ---
-
-/** Format the messages new since the last turn. `history` is the whole request:
- *  a tool message names its call only by `tool_call_id` (pi sends no `name`),
- *  so formatToolResponse takes the tool's name and command from the assistant
- *  `tool_calls` that issued it — every result used to be labelled
- *  `name="unknown"` (#50). */
 export function formatDeltaMessages(messages: ParsedMessage[], history: ParsedMessage[] = messages): string {
   const parts: string[] = [];
   for (const m of messages) {
     if (m.role === "assistant") {
-      // Skip assistant messages — M365 already has them server-side.
-      // Echoing them back as a user message confuses M365.
       continue;
     } else if (m.role === "tool") {
-      // Same rendering as the first turn: named for the call that produced it.
       parts.push(formatToolResponse(m, history));
     } else if (m.role === "system") {
-      // Skip system messages on follow-up turns
     } else {
       parts.push(`<${m.role}>\n${getMessageContent(m)}\n</${m.role}>`);
     }
@@ -421,22 +260,12 @@ export function formatDeltaMessages(messages: ParsedMessage[], history: ParsedMe
   return parts.join("\n\n");
 }
 
-// --- Main handler ---
-
-/**
- * Handle a chat completion request, returning an OpenAI-compatible Response.
- * The SessionPool routes each conversation to its own ModelSession.
- */
 export async function handleChatCompletion(
   body: ChatBody,
   pool: SessionPool,
   opts: {
     signal?: AbortSignal;
-    /** Mint credentials for the account this request runs on (personal mode);
-     *  null = the builtin layout. */
     ensureCredentials?: (accountId: string | null) => Promise<void>;
-    /** The personal account chosen for this request, resolved per request by
-     *  the app (see createApp's `accountId`); null/undefined = builtin. */
     accountId?: string | null;
   } = {},
 ): Promise<Response> {
@@ -446,16 +275,8 @@ export async function handleChatCompletion(
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
   const requestedModel = body.model;
 
-  // Priority access (§15, §24 F55, §26, issue #18). Once a budget is used up
-  // every turn on it is refused until the reset, so don't start one: serve the
-  // opt-in fallback model (M365_OPUS_FALLBACK_MODEL, e.g. the unmetered
-  // claude-opus-4.8; M365_SONNET_FALLBACK_MODEL for Sonnet 5.5), or answer the
-  // 429 here. A refused turn costs no allowance, but it does cost an M365 turn
-  // and often a fresh conversation — what the account's thread-rate throttle
-  // counts.
-  // Metering is a property of the paid M365 scenarios. A personal (consumer)
-  // session has no priority-access budget at all — its own CostQuota is enforced
-  // upstream — so applying the wall here 429s a turn the account can serve (F109).
+  // Metering is a property of the paid scenarios; a rule of the upstream API.
+  // Consumer sessions enforce their own CostQuota upstream.
   const metered = !isPersonalMode();
   const requestedBudget = metered ? meteredBudgetOf(requestedModel) : null;
   const knownExhaustion = metered ? activePriorityAccessExhaustion(requestedBudget ?? requestedModel) : null;
@@ -467,54 +288,20 @@ export async function handleChatCompletion(
   let model = fallbackModel ?? requestedModel;
   if (fallbackModel) log.info(`Priority access exhausted until ${knownExhaustion!.resetsAt.toISOString()} — serving ${requestedModel} with ${fallbackModel} (${PRIORITY_ACCESS_FALLBACK_ENV[requestedBudget!]})`);
   if (conv.servedModel && conv.servedModel !== model) {
-    // The conversation was being served by another model (e.g. Opus 5.5 before
-    // the fallback): continue in a fresh M365 conversation with the full history.
     log.info(`Conversation switches model ${conv.servedModel} → ${model}: fresh conversation, full history`);
     session.newConversation();
     conv.sentMessageCount = 0;
     conv.lastSentIsReset = true;
   }
 
-  // Which requests carry the declarative tool agent. GPT-the-chat-model won't
-  // tool-call agent-less (0/4), so it needs the agent. Claude tool-calls reliably
-  // AGENT-LESS via shell-routing (F23), and on a non-premium account the agent
-  // path doesn't serve Claude at all (§22 F44) — except Claude Opus, which takes
-  // it: agent-less, Opus 4.8 works in its own code interpreter unless the
-  // framing steers it out (§36). `Gpt_6_Reasoning` doesn't serve
-  // with the agent on any account (§22 F45, #41), and `Gpt_6_Sol_Reasoning` /
-  // `Gpt_61_Sol_Reasoning` only on a premium one (learned at runtime, see the
-  // dead-route fallback in runBuffered). The rule lives in core (`requestUsesAgent`);
-  // M365_FORCE_AGENT=1 / =0 forces the agent on / off for tool requests.
-  // Derive it from the RESOLVED tone, not the raw model string: getToneForModel
-  // routes any unmapped `claude-*` (e.g. the `claude-opus-5[1m]` a Claude Code
-  // client sends) to a Claude tone, so this keeps that request on the working
-  // agent-less path. The old `/claude/i.test(model)` + `magic` fallback split a
-  // claude-* string into GPT-tone + agent-suppressed — the confab quadrant we
-  // observed. One resolved tone drives both.
   let tone = getToneForModel(model);
-  // Framing default follows the MODEL (defaultFramingForModel): the Claude,
-  // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
-  // `<system>`-tagged baseline as an injected prompt; on Opus it trips the
-  // jailbreak classifier). Opus, Sonnet 4.6, GPT-6, GPT-6 Sol and GPT-6.1 Sol get the
-  // turn-saving `relay_batch` (§24 F60, §25, §27, §28); Sonnet 5 and Sonnet 5.5 plain `relay`. The
-  // rest keep the bench-tuned `baseline`.
-  // Keyed on the model, not the tone, because one tone can serve two models.
-  // M365_FRAMING_* still wins.
   let framingVariant = currentFramingVariant(defaultFramingForModel(model));
   let useToolAgent = requestUsesAgent(model, !!hasTools);
 
-  // Format message: full prompt on first turn, delta on follow-ups.
-  // M365 is stateful — it remembers everything from prior turns,
-  // so we only need to send new messages after the first turn.
   const isFirstTurn = session.turnCount === 0;
-  // Whether this turn carries the full prompt rather than a delta. One predicate
-  // for the formatter, for what the pool remembers, and for whether the turn
-  // proved the session in use: M365's turnCount is 0 after any internal
-  // newConversation(), which an earlier turn may already have used and sent.
   const sendFullHistory = isFirstTurn || conv.sentMessageCount === 0;
   const convId = session.conversationId;
   let text: string;
-  // Images ride on the message that carries their text (core image-input.ts).
   let inputImages: string[];
   if (sendFullHistory) {
     text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framingVariant);
@@ -526,37 +313,25 @@ export async function handleChatCompletion(
     const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages, body.messages) : "";
     if (delta.length > 0) {
       text = delta;
-      // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
         text = `${conv.pendingNote}\n\n${delta}`;
         log.info("Prepended the only-the-first-call-ran note (last reply was partly executed)");
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);
     } else {
-      // No meaningful new content to send — nudge M365 to continue.
       text = "Please continue.";
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=retry, cid=${convId}`);
     }
   }
-  conv.pendingNote = null; // one turn only: consumed above, or stale
+  conv.pendingNote = null;
 
   log.debug("Formatted prompt:", trunc(text, 1000));
 
   const completionId = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
 
-  // Pre-flight credentials (spec §10.5, personal mode only). A dead personal
-  // session must be a real 401 BEFORE the stream commits 200 — the streaming
-  // path commits a role chunk before produce() runs (that is why the
-  // priority-access wall had to be an in-stream error chunk), so a 401 would
-  // be impossible there. Enterprise mode passes no ensureCredentials: today's
-  // behaviour, byte for byte.
   if (opts.ensureCredentials) {
     try {
-      // The CONVERSATION's account, not this request's: a continuation keeps
-      // the account it was opened on (an existing conversation is reused after
-      // a switch), and minting for the wrong one would hand this thread
-      // another account's credentials.
       await opts.ensureCredentials(conv.accountId);
     } catch (err: any) {
       log.info(`Pre-flight failed: ${err?.message}`);
@@ -570,13 +345,9 @@ export async function handleChatCompletion(
     }
   }
 
-  // Buffer the full response, with a couple of quick retries on an empty reply.
   const MAX_RETRIES = 2;
   const SHORT_RETRY_DELAY_MS = 2_000;
 
-  // Captured from the final attempt — surfaced through the OpenAI `usage` block
-  // so clients can see M365's conversation-quota % (the closest proxy we have
-  // to "context window remaining"). Token counts aren't exposed by M365.
   let lastThrottle: { current: number; max: number } | null = null;
   let lastContentOrigin: string | null | undefined;
   let lastMessageType: string | null | undefined;
@@ -584,11 +355,6 @@ export async function handleChatCompletion(
   let lastTurnCount: number | null | undefined;
   let lastMetering: Record<string, number> | null | undefined;
 
-  // `onDelta` (when provided) forwards each text delta to the caller AS IT ARRIVES,
-  // for live incremental streaming. It's safe to forward without ever retracting:
-  // runBuffered only retries on an EMPTY attempt (Disengaged, dead-agent, throttle),
-  // and an empty attempt emits no deltas — so a forwarded delta always belongs to the
-  // one attempt that produced content and is never re-sent by a subsequent retry.
   async function runBuffered(
     onDelta?: (delta: string) => void,
   ): Promise<{ fullText: string } | { error: Response }> {
@@ -598,44 +364,16 @@ export async function handleChatCompletion(
     let priorityFallbackDone = false;
     let internalErrorFreshRetried = false;
     let originalText = text;
-    // Self-imposed pacing while the account is degraded (thread-rate throttle). A
-    // no-op when healthy; during backoff it sleeps a jittered delay so we stop
-    // starting fresh turns into the throttle and let it self-heal (H-R1). This
-    // replaced the old auto-reauth, which didn't clear the throttle and raised our
-    // detection profile. A single long pi thread never trips the trigger.
-    // The account this conversation runs on (see ensureCredentials above).
     await awaitDegradationBackoff(conv.accountId);
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      // A <tool_response> the model writes after a real call is a stop sequence
-      // (truncateAtFabricatedToolResponse), but the cut in produce() only runs
-      // once M365 has finished the turn, and Sonnet 4.6 sometimes writes the rest
-      // of the session after its call: minutes of invented output (45-69k chars),
-      // long enough for pi's request timeout to fail the run (hypotheses §34). So
-      // stop the turn once the invented tail runs past M365_EARLY_STOP_AFTER
-      // chars (2,000 by default), the way a client's Stop does; the cut then keeps the head as
-      // before. Not at the tag itself: M365 keeps the whole message in the
-      // conversation, the model seems to follow a short tail as its plan, and
-      // stopping at the tag cost Sonnet 4.6 (`claude-sonnet`, agent-less) 10%
-      // more turns (§35 F89).
-      // M365_NO_EARLY_STOP=1 waits for the turn to end instead.
       const earlyStop = hasTools && !process.env.M365_NO_EARLY_STOP ? new AbortController() : null;
       const stopAfter = earlyStopAfter();
       const signal = !earlyStop ? opts.signal
         : opts.signal ? AbortSignal.any([opts.signal, earlyStop.signal]) : earlyStop.signal;
       let copilotStream;
       try {
-        // M365_AVOID_THROTTLING=1: wait until the account's turn bucket can
-        // afford this turn (turn-budget.ts, hypotheses §37). A pi session is one
-        // long thread, but every turn in it draws on the same bucket as a bench
-        // sweep (F58), so a busy enough session runs it dry and then sits out a
-        // throttle of about an hour. Every upstream turn passes here, the
-        // forcing retries included; run() calls the same wait before its reconnect.
         const waitForBudget = () => awaitTurnBudget({ signal: opts.signal, maxWaitMs: body.stream ? undefined : UNSTREAMED_BUDGET_WAIT_LIMIT_MS });
         await waitForBudget();
-        // Only attach the tool-calling agent when the request actually has tools.
-        // The agent overrides `tone` (forces GPT-5), so tool-less requests must
-        // skip it to reach the model the tone selects (e.g. Claude). See
-        // ModelSession.run / docs H8.6.
         copilotStream = await session.run(text, model, signal, useToolAgent, inputImages, waitForBudget);
       } catch (err: any) {
         if (err instanceof TurnBudgetHold) return { error: turnBudgetHoldResponse(err) };
@@ -643,16 +381,13 @@ export async function handleChatCompletion(
       }
 
       let fullText = "";
-      let tagAt = -1; // where the invented <tool_response> starts, once seen
+      let tagAt = -1;
       try {
         for await (const delta of copilotStream) {
           fullText += delta;
           onDelta?.(delta);
           if (!earlyStop || earlyStop.signal.aborted) continue;
-          // Measured on the stream's composed text, which has the heads that
-          // arrive only as snapshots (#29) — a fence's opening line among them.
           const sofar = (copilotStream.fullText?.length ?? 0) > fullText.length ? copilotStream.fullText! : fullText;
-          // Look for the tag only when this delta (or its seam with the last one) can hold it.
           if (tagAt < 0 && /<tool_/i.test(fullText.slice(Math.max(0, fullText.length - delta.length - 16)))) {
             tagAt = fabricatedToolResponseAt(sofar, body.tools);
           }
@@ -668,17 +403,13 @@ export async function handleChatCompletion(
         return { error: jsonResponse(502, { error: { message: err.message, type: "upstream_error" } }) };
       }
 
-      // Image gen (§14): the picture arrives on a GraphicArt frame, usually with NO
-      // chat text — so an image turn looks empty to the checks below and would burn
-      // a retry. Render the image(s) into the response instead, and (for streaming)
-      // emit the markdown as a trailing delta so the client isn't left with nothing.
       const images = copilotStream.images ?? [];
       if (images.length > 0) {
         const imageMd = await renderImagesMarkdown(images);
         if (imageMd) {
           const addition = fullText.length > 0 ? `\n\n${imageMd}` : imageMd;
           fullText += addition;
-          onDelta?.(addition);   // stream the appended markdown (text deltas already sent)
+          onDelta?.(addition);
         }
       }
 
@@ -689,29 +420,12 @@ export async function handleChatCompletion(
       lastTurnCount = copilotStream.turnCount;
       lastMetering = copilotStream.metering;
 
-      // M365 SAYS when it throttles: the final item's result is `Throttled` /
-      // `PerUserThrottled` (#35). Checked BEFORE the content check so
-      // an apology that ever arrives as content can't pass for an answer. This
-      // used to fall through to the empty-reply path below — two "quick retries"
-      // straight back into the throttle, then a 502 blaming a content filter.
-      // Fail fast with a 429 instead, and count it toward the degradation backoff.
       if (copilotStream.result?.value === "Throttled") {
         noteRequestOutcome(true, convId, conv.accountId);
         log.info(`Upstream Throttled (${copilotStream.result.errorCode ?? "no errorCode"}) — 429, no retry`);
         return { error: throttledResponse(copilotStream.result) };
       }
 
-      // A tone whose agent route serves only on a premium account came back as
-      // the dead route (`InternalError`, no content): this account isn't
-      // premium. Remember that for the process, and re-send the WHOLE request
-      // agent-less in a fresh conversation — the dead turn processed nothing, and
-      // a delta would have no context. Free retry, at most once per request; the
-      // next request on this tone goes agent-less from the start. Never under
-      // M365_FORCE_AGENT=1, which asked for the agent regardless.
-      // A premium account produces the identical wire state as a one-off
-      // transient (§23), so once the agent has answered for this tone the
-      // InternalError falls through to the ordinary empty-reply handling below
-      // instead (isAgentRouteAlive).
       if (
         useToolAgent && !agentFallbackDone &&
         PREMIUM_ONLY_AGENT_TONES.has(tone) &&
@@ -732,16 +446,6 @@ export async function handleChatCompletion(
         continue;
       }
 
-      // A priority-access cap (Opus 5.5, Sonnet 5.5) arrives as a turn whose
-      // text is a refusal ("You've used your available priority access…") and
-      // whose final result is `OutOfCredits` (§24 F55). Left alone, the client
-      // would receive a refusal dressed as an answer — the same hazard class as
-      // the image-quota text (§14 H14.4). Surface it as a 429 with the reset
-      // time instead, or, when the budget's fallback model is set
-      // (M365_OPUS_FALLBACK_MODEL / M365_SONNET_FALLBACK_MODEL), re-send the
-      // whole request to that model in a fresh conversation (issue #18). Either
-      // way remember it, so the next requests don't spend M365 turns on
-      // refusals until the reset.
       const exhausted = priorityAccessExhaustionOf(copilotStream.result, fullText);
       if (exhausted) {
         const budget = metered ? meteredBudgetOf(model) : null;
@@ -761,43 +465,29 @@ export async function handleChatCompletion(
           attempt--;
           continue;
         }
-        noteRequestOutcome(false, convId, conv.accountId); // an answer, not a throttle
+        noteRequestOutcome(false, convId, conv.accountId);
         log.info(`Priority access exhausted (${exhausted.window}) — resets ${exhausted.resetsAt.toISOString()}`);
         return { error: priorityAccessResponse(exhausted, model) };
       }
 
       if (copilotStream.hasContent || fullText.length > 0) {
-        noteRequestOutcome(false, convId, conv.accountId); // clean response → degradation has lifted
-        if (useToolAgent) noteAgentRouteAlive(tone); // the agent route answered on this account
+        noteRequestOutcome(false, convId, conv.accountId);
+        if (useToolAgent) noteAgentRouteAlive(tone);
         conv.servedModel = model;
-        inputImages = []; // on the server now: a forcing retry in this conversation needn't resend them
+        inputImages = [];
         return { fullText };
       }
 
-      // Disengaged is a deliberate safety refusal, NOT a transient empty. Retrying
-      // it with "Please continue." just disengages again and burns the 600-msg
-      // quota (observed: 5 wasted messages in one turn). Fail fast with a clear
-      // signal instead. Commonly fires when a heavy tool prompt is paired with a
-      // non-default model/agent (e.g. a Claude tone + the declarative agent).
+      // Disengagement is permanent; observed, undocumented by Microsoft.
       if (copilotStream.messageType === "Disengaged") {
-        // F22: the default framing's override-shape language occasionally trips Azure
-        // Prompt Shields (jailbreak classifier) on benign requests (e.g. "replace X
-        // with Y, leave everything else unchanged"). Retry ONCE with the low-override
-        // `softened` framing in a FRESH conversation (a Disengaged conversation stays
-        // Disengaged). Drops the worst-case disengage ~100%→~4%. Off via
-        // M365_NO_DISENGAGE_RETRY.
         if (hasTools && !disengageRetried && !process.env.M365_NO_DISENGAGE_RETRY) {
           disengageRetried = true;
           session.newConversation();
-          // `softened` is the low-override twin of the `<system>`-tagged framings.
-          // A variant that deliberately avoids `<system>` tags (Claude Sonnet's
-          // `relay`) keeps itself: swapping to `softened` would reintroduce
-          // exactly the tag that model reads as a forged system prompt.
           const retryVariant = transcriptStyleForVariant(framingVariant).framingTag === "system" ? "softened" : framingVariant;
           text = formatMessages(body.messages, body.tools, body.tool_choice, session.conversationId, retryVariant);
           inputImages = imageUrls(body.messages);
           log.info(`Upstream Disengaged — retrying once with '${retryVariant}' framing in a fresh conversation (F22)`);
-          attempt--; // free retry; bounded — disengageRetried flips once
+          attempt--;
           continue;
         }
         log.info("Upstream Disengaged — failing fast (no retry) to preserve quota");
@@ -811,16 +501,6 @@ export async function handleChatCompletion(
         };
       }
 
-      // A content-less `InternalError` is a turn M365 dropped, and the
-      // conversation it happened in tends to stay dropped: "Please continue."
-      // into it came back `InternalError` again in 9 of 18 retries, against
-      // 28 of 89 turns overall (Gpt_6_Sol_Reasoning on a non-premium account,
-      // T3 Code driving Claude Code, 2026-10-14). The turn processed nothing,
-      // so a "continue" has nothing to continue from either: re-send the
-      // WHOLE request once in a fresh conversation instead. Not a free retry: it
-      // spends an attempt, so a tone that fails every time still ends at the
-      // premium-only / empty-response handling below. A premium-only model's
-      // InternalError is deterministic (§24), so it skips straight there.
       if (
         !internalErrorFreshRetried &&
         copilotStream.result?.value === "InternalError" &&
@@ -838,26 +518,15 @@ export async function handleChatCompletion(
         continue;
       }
 
-      // Empty response. Only an at-limit throttle warrants treating this as rate
-      // limiting; otherwise it's a different failure (content filter, an invalid
-      // agent/session, a transient upstream error) where a long escalating
-      // backoff is futile and reads as a silent hang. Fail fast after a couple of
-      // quick retries instead.
       const t = copilotStream.throttle;
       if (t && t.current >= t.max) {
         return { error: rateLimitResponse(t) };
       }
       if (attempt < MAX_RETRIES) {
-        // A dead/deleted agent returns an instant empty reply (throttle: null).
-        // Re-resolve the agent once before retrying so a long-lived host
-        // self-heals from the deleted-agent trap instead of looping on empties.
         if (!agentRefreshed) {
           agentRefreshed = true;
           const agentChanged = await session.refreshAgent();
           if (agentChanged) {
-            // The cached agent was stale/deleted and has been re-resolved.
-            // Resend the original prompt to the fresh agent — a bare "continue"
-            // would have no context since the dead agent processed nothing.
             log.info("Agent re-resolved after empty reply, resending original prompt");
             text = originalText;
             await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
@@ -866,20 +535,12 @@ export async function handleChatCompletion(
         }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        text = "Please continue."; // M365 already has context
+        text = "Please continue.";
       } else {
-        // A model served only on a premium account, on a non-premium one (Opus
-        // 4.8: BotConnection, `InternalError`, every time, with the agent and
-        // without — §24, §36). Not a throttle, so it doesn't feed the degradation
-        // backoff; say what it is instead of "empty response".
         if (isPremiumOnlyModel(model) && copilotStream.result?.value === "InternalError") {
           log.info(`${model}: InternalError on every attempt — premium-only model on a non-premium account?`);
           return { error: premiumOnlyModelResponse(model) };
         }
-        // Final empty after retries, and not an at-limit (per-conversation) cap:
-        // this is the thread-rate throttle signature (F13). Feed the degradation-
-        // backoff policy — once empties span enough distinct conversations it paces
-        // subsequent turns so the account can self-heal (H-R1). Never blocks this request.
         noteRequestOutcome(true, convId, conv.accountId);
         return { error: emptyResponseResponse(t) };
       }
@@ -888,34 +549,17 @@ export async function handleChatCompletion(
     return { error: emptyResponseResponse(null) };
   }
 
-  // Produce the final turn result as DATA (not a Response), so the same logic
-  // renders as either JSON (non-stream) or an early-flushed SSE stream (stream).
-  // For streaming we return the SSE stream FIRST and run produce() INSIDE it, so the
-  // client gets HTTP 200 + a role chunk + heartbeats immediately instead of waiting
-  // out the whole (up to ~160s) M365 turn and risking a read-timeout.
   type Produced =
     | { kind: "error"; resp: Response }
     | { kind: "text"; text: string }
     | { kind: "tools"; toolCalls: ReturnType<typeof parseToolCalls>["toolCalls"] };
 
-  // `onDelta` streams text to the client live (non-tool path only — see produce's
-  // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
-  // can't be shown verbatim, so it stays fully buffered.
   async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
-  // The idle clock starts when the turn ENDS: a turn that outlived the window
-  // (a slow Opus turn, a lowered M365_SESSION_IDLE_MS) must not make the session
-  // it just served look idle to the next request.
   const markUsed = () => {
-    // This turn carried the full prompt, so sentMessageCount is now the new
-    // conversation's baseline (not a reset's).
     conv.lastSentIsReset = false;
     conv.lastAccessedAt = Date.now();
   };
-  // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
-    // A <tool_response> the model wrote itself is a stop sequence: everything
-    // after it is an invented result (see truncateAtFabricatedToolResponse).
-    // `cutFabricated` reflects the attempt whose text is finally used.
     let cutFabricated = false;
     let droppedCalls = 0;
     const stopAtFabricatedResult = (raw: string): string => {
@@ -933,17 +577,9 @@ export async function handleChatCompletion(
     let { parsed, judged } = parseReply(fullText, body.tools);
     log.info(`Parse result: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
 
-    // Salvage stochastic turn-1 confabulation: M365's chat model sometimes claims it
-    // "can't access the files / commands return no output" and asks the user to paste
-    // them, WITHOUT calling a tool — even though the environment is real (the bench +
-    // pi both reproduce this). Re-prompt forcefully in the SAME conversation (one
-    // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
       : Number(process.env.M365_CONFAB_RETRIES ?? 1);
-    // The model never actually acted if no assistant turn in the history carried a
-    // tool call. Used to gate the hallucinated-completion retry (a model that did
-    // real work called at least one tool), keeping false positives near zero.
     const everActed = (body.messages ?? []).some(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
@@ -965,14 +601,6 @@ export async function handleChatCompletion(
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
-    // Never pass a remote M365 artifact off as a successful local edit. A retry
-    // may merely transform a Teams URL into `sandbox:/mnt/data/...`; once the
-    // configured attempts are exhausted, fail explicitly so the harness/user can
-    // switch models instead of applying a nonexistent local file.
-    //
-    // Judge the FINAL text, not a sticky flag from the first attempt: a retry that
-    // replaces the bogus mutation claim with a genuine answer ("I need the file
-    // path first") has fixed the problem, and 502-ing it would be a regression.
     if (!parsed.hasToolCalls && looksLikeRemoteArtifactCompletion(parsed.textContent)) {
       log.info("Remote-artifact mutation claim persisted without a local tool call after forcing retries — failing closed");
       return {
@@ -986,20 +614,15 @@ export async function handleChatCompletion(
       };
     }
 
-    // Fail-closed: if model mixed text with tool calls, strip text and re-prompt once.
-    // This enforces the "output ONLY a tool call" contract.
     if (parsed.hasToolCalls && parsed.textContent) {
       const extraText = parsed.textContent.trim();
       if (extraText.length > 0) {
         log.info(`Mixed output detected (${extraText.length} chars of text alongside ${parsed.toolCalls.length} tool calls), stripping text`);
-        // Strip the text — the tool calls are what the client needs.
-        // Log the stripped text for debugging but don't send it downstream.
         log.debug("Stripped text:", trunc(extraText, 500));
         parsed = { ...parsed, textContent: null };
       }
     }
 
-    // Handle "reply" tool calls — convert to plain text
     if (parsed.hasToolCalls) {
       const replyCall = parsed.toolCalls.find(tc => tc.function.name === "reply");
       const realToolCalls = parsed.toolCalls.filter(tc => tc.function.name !== "reply");
@@ -1020,12 +643,6 @@ export async function handleChatCompletion(
         parsed.toolCalls = realToolCalls;
       }
 
-      // Enforce one tool call per turn unless explicitly opted out. M365 — the
-      // reasoning tones especially — batches its whole plan into a single
-      // response. Executing a batch runs later steps on guessed state and lets a
-      // premature success claim ride along at the end. Keeping only the first
-      // call forces a real step-by-step loop where each call reacts to the
-      // previous tool_response. Set M365_ALLOW_MULTI_TOOL to restore batching.
       if (!process.env.M365_ALLOW_MULTI_TOOL && parsed.toolCalls.length > 1) {
         log.info(`One-call-per-turn: keeping ${parsed.toolCalls[0].function.name}, dropping ${parsed.toolCalls.length - 1} batched call(s)`);
         droppedCalls = parsed.toolCalls.length - 1;
@@ -1034,8 +651,6 @@ export async function handleChatCompletion(
     }
 
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
-      // A heredoc file write past the Windows command-line cap would reach the
-      // shell cut short; run the same write through the harness's write tool.
       const asWrite = longHeredocAsWrite(parsed.toolCalls[0], body.tools);
       let rewriteNote: string | null = null;
       if (asWrite) {
@@ -1043,8 +658,6 @@ export async function handleChatCompletion(
         parsed.toolCalls = [asWrite.call];
         rewriteNote = `(Note: your heredoc to \`${asWrite.path}\` was longer than the ~8,000-character Windows command-line limit and would have been cut off, so it was written with the \`${asWrite.call.function.name}\` tool instead.${asWrite.skipped ? ` The commands after the heredoc did NOT run: \`${asWrite.skipped.slice(0, 200)}\`.` : ""})`;
       }
-      // The model's server-side history holds more than what runs; say so on
-      // the turn that carries the real result (executedOnlyFirstNote).
       const notes = [rewriteNote, executedOnlyFirstNote(cutFabricated, droppedCalls, textAfterFirstToolCall(fullText, body.tools).length)].filter(Boolean);
       conv.pendingNote = notes.length ? notes.join("\n") : null;
       markUsed();
@@ -1053,15 +666,13 @@ export async function handleChatCompletion(
     markUsed();
     return { kind: "text", text: fullText };
   } else {
-    // No tools — stream deltas live (onDelta) while buffering for the retry logic.
     const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length; markUsed();
     return { kind: "text", text: result.fullText };
   }
-  } // end produce()
+  }
 
-  // --- Render: JSON (non-stream) or an early-flushed SSE stream (stream) ---
   const includeUsage = !!body.stream_options?.include_usage;
   const usage = () => buildUsage(lastThrottle, lastContentOrigin, lastMessageType, lastScores, lastTurnCount, lastMetering);
 
@@ -1082,48 +693,26 @@ export async function handleChatCompletion(
     });
   }
 
-  // Streaming: send HTTP 200 + a role chunk + keepalive comments from t=0, then run
-  // produce() INSIDE the stream so the client never waits out the whole M365 turn
-  // (up to ~160s) before the first byte — avoids client read-timeouts.
-  //
-  // On the non-tool path we forward each text delta AS IT ARRIVES (`liveDelta`), so
-  // `stream:true` is genuinely incremental. Tool mode still buffers: the raw text is
-  // parsed for tool-call fences and can't be shown verbatim, so its tool_calls (or a
-  // prose fallback) are emitted once at the end.
   return sseResponse(new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
       const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
       const base = { id: completionId, object: "chat.completion.chunk", created, model };
       send({ ...base, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-      // Keepalive: a REAL empty-delta chunk, not an SSE comment. Agents that track
-      // stream liveness by data chunks (e.g. Hermes: comments don't reset its
-      // `last_chunk_time`, so a silent turn shows "N s without stream output" and can
-      // trip its stale watchdog) see this as activity. No content is added — an empty
-      // delta contributes nothing to the assembled message.
       const hb = setInterval(() => {
         try { send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }] }); } catch {}
       }, 15000);
 
-      // Live token passthrough (non-tool only). Track exactly what we've sent so the
-      // final render emits only the not-yet-streamed remainder. session.ts guarantees
-      // every forwarded delta extends the answer, so `sent` is always a prefix of the
-      // final text — the remainder is a clean tail, never a duplicate.
       let sent = "";
-      // Hold the head of the stream until it can't be a priority-access refusal
-      // (Opus quota, §15): those arrive as ordinary content, so forwarding them
-      // live would put the refusal in front of the client before the 429 that
-      // replaces it — delivering exactly the confusion the 429 prevents. The
-      // gate releases within ~45 chars, i.e. one short delta on a normal turn.
       let head = "";
       let gated = true;
       const liveDelta = hasTools ? undefined : (delta: string) => {
         if (!delta) return;
         if (gated) {
           head += delta;
-          if (couldBePriorityAccessPrefix(head)) return; // still undecided — keep buffering
+          if (couldBePriorityAccessPrefix(head)) return;
           gated = false;
-          delta = head; // release everything held so far, in order
+          delta = head;
         }
         sent += delta;
         try { send({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] }); } catch {}
@@ -1138,10 +727,6 @@ export async function handleChatCompletion(
           let message = "upstream error";
           let type = "upstream_error";
           let code: string | undefined;
-          // Carry the structured fields through, not just the prose: a streaming
-          // client still has to tell a priority-access wall (back off until the
-          // reset) from a transient upstream failure (retry now), and the status
-          // code it would have read is gone once HTTP 200 is committed.
           try {
             const parsed = JSON.parse(await p.resp.text())?.error;
             if (parsed?.message) message = parsed.message;
@@ -1149,7 +734,6 @@ export async function handleChatCompletion(
             if (parsed?.code) code = parsed.code;
           } catch {}
           const retryAfter = p.resp.headers.get("Retry-After");
-          // HTTP 200 is already committed, so surface the failure as an in-stream error chunk.
           send({ ...base, error: { message, type, ...(code ? { code } : {}), ...(retryAfter ? { retry_after: Number(retryAfter) } : {}) } });
         } else if (p.kind === "tools") {
           p.toolCalls.forEach((tc, i) => {
@@ -1158,18 +742,12 @@ export async function handleChatCompletion(
           });
           send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], ...(includeUsage ? { usage: usage() } : {}) });
         } else {
-          // Emit only what wasn't already streamed live: the whole text if nothing was
-          // (tool-mode prose fallback, or a fully-buffered turn), or just the tail when
-          // live deltas already covered a prefix. If `sent` somehow isn't a prefix of
-          // the final text (a divergent snapshot upstream chose not to stream), fall
-          // back to sending nothing more rather than duplicating already-sent bytes.
           const remainder = p.text.startsWith(sent) ? p.text.slice(sent.length) : "";
           if (!p.text.startsWith(sent)) log.info(`Streamed prefix diverged from final text (sent ${sent.length}, final ${p.text.length} chars) — not re-sending to avoid duplication`);
           if (remainder) send({ ...base, choices: [{ index: 0, delta: { content: remainder }, finish_reason: null }] });
           send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: outputFinishReason(p.text) }], ...(includeUsage ? { usage: usage() } : {}) });
         }
       } catch {
-        // client likely disconnected mid-emit — nothing more to do
       } finally {
         try { controller.enqueue(enc.encode("data: [DONE]\n\n")); controller.close(); } catch {}
       }
@@ -1177,18 +755,6 @@ export async function handleChatCompletion(
   }));
 }
 
-/**
- * Build the OpenAI-style `usage` block from whatever diagnostic info M365 gave
- * us. Token counts are NOT exposed by M365's WebSocket API (we'd need to count
- * locally with a tokenizer that matches the underlying model — see the doc on
- * token-usage hypotheses). What M365 does send is a **conversation quota**:
- * how many user messages out of the 600-per-conversation cap have been spent.
- *
- * That's a different axis from token-window utilisation, but it's the closest
- * thing we have to "remaining budget", so we surface it as extension fields
- * (`x_m365_*`) alongside the zeroed standard counters. Real OpenAI clients
- * ignore unknown extension fields; curious users can read them.
- */
 function buildUsage(
   throttle: { current: number; max: number } | null,
   contentOrigin?: string | null,
@@ -1211,19 +777,11 @@ function buildUsage(
   if (contentOrigin) base.x_m365_content_origin = contentOrigin;
   if (messageType) base.x_m365_message_type = messageType;
   if (typeof turnCount === "number") base.x_m365_turn_count = turnCount;
-  // Disengaged-classifier scores. Empirically: clean tool calls sit at
-  // ~1e-13 / ~1e-8, jailbreak-shaped prompts climb to ~1e-3 / ~1e-3. The
-  // `dea_violation` component is the one that actually correlates with the
-  // Disengaged filter firing — surface that explicitly so clients can monitor
-  // their proximity to the threshold.
   if (scores) {
     base.x_m365_classifier_scores = scores;
     if (typeof scores.dea_violation === "number") base.x_m365_dea_score = scores.dea_violation;
     if (typeof scores.BotOffense === "number") base.x_m365_offense_score = scores.BotOffense;
   }
-  // Priority access left after this turn (paid-scenario turns only, §24 F55,
-  // §26): one unit per turn, so a client can see the wall coming (issue #18).
-  // `x_m365_opus_*` for Opus 5.5, `x_m365_sonnet55_*` for Sonnet 5.5.
   for (const [budget, { usageKey }] of Object.entries(METERED_BUDGETS)) {
     const left = meteredAllowance(metering, budget as MeteredBudget);
     if (left?.daily !== undefined) base[`x_m365_${usageKey}_daily_remaining`] = left.daily;
@@ -1232,8 +790,6 @@ function buildUsage(
   return base;
 }
 
-// --- Helpers ---
-
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -1241,10 +797,6 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
   });
 }
 
-/** A priority-access budget (Opus 5.5, Sonnet 5.5) ran out. A real 429 (with `Retry-After` and
- *  the UTC reset instant) so a client backs off to the refill instead of
- *  retrying into a wall — and so an agent loop doesn't treat the refusal text as
- *  the model's answer. Resets at midnight UTC; the weekly budget on Monday. */
 function priorityAccessResponse(exhaustion: PriorityAccessExhaustion, model: string): Response {
   const retryAfter = secondsUntilReset(exhaustion);
   const label = exhaustion.model ?? model;
@@ -1284,9 +836,6 @@ function rateLimitResponse(throttle: { current: number; max: number } | null): R
   return jsonResponse(429, { error: { message: rateLimitMessage(throttle), type: "rate_limit_error" } });
 }
 
-/** M365 explicitly throttled the turn (`result.value: "Throttled"`). It names
- *  the scope (`PerUserThrottled`) but not the duration, so no Retry-After is
- *  invented. */
 function throttledResponse(result: { errorCode?: string; message?: string }): Response {
   const scope = result.errorCode ? ` (${result.errorCode})` : "";
   return jsonResponse(429, {
@@ -1300,10 +849,6 @@ function throttledResponse(result: { errorCode?: string; message?: string }): Re
   });
 }
 
-/** M365_AVOID_THROTTLING would have had to wait longer than this request may
- *  (a throttle hold, usually), so the turn was never sent: sending it would only
- *  keep the throttle alive. Whatever retries the client makes are answered here
- *  the same way, without reaching M365. */
 function turnBudgetHoldResponse(hold: TurnBudgetHold): Response {
   const retryAfter = Math.max(1, Math.ceil(hold.waitMs / 1000));
   return jsonResponse(
@@ -1319,9 +864,6 @@ function turnBudgetHoldResponse(hold: TurnBudgetHold): Response {
   );
 }
 
-/** Empty upstream reply that is NOT an at-limit throttle — a distinct failure
- *  (content filter, invalid agent/session, transient error) we surface clearly
- *  instead of hanging on a long retry loop. */
 function emptyResponseResponse(throttle: { current: number; max: number } | null): Response {
   const detail = throttle ? ` (throttle ${throttle.current}/${throttle.max})` : "";
   return jsonResponse(502, {
@@ -1341,6 +883,3 @@ function premiumOnlyModelResponse(model: string): Response {
     },
   });
 }
-
-// (streaming is emitted inline by the early-flushed SSE renderer in
-// handleChatCompletion; the old streamText/streamToolCalls helpers were removed.)

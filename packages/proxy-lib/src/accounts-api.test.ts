@@ -23,8 +23,6 @@ const deps = (live: string[] = []): AccountsDeps => ({
 });
 
 beforeEach(() => {
-  // useMockRegistry writes under M365_ACCOUNT_HOME's accountsDir(); sharing a
-  // home with another test file would make this registry collide with its own.
   process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "accounts-api-"));
   clearMockRegistry();
   resetAccountsHealthCache();
@@ -92,8 +90,6 @@ describe("DELETE /accounts/:id", () => {
     const body = r.body as any;
     expect(body.error.code).toBe("account_busy");
     expect(body.error.message).toContain('"work"');
-    // The hint must name a way out that exists: the page cannot finish a
-    // thread, so it names the idle limit and switching the client.
     expect(body.error.hint).toContain("M365_SESSION_IDLE_MS");
     expect(body.error.hint).toContain("switch your client");
   });

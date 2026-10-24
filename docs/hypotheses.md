@@ -5780,3 +5780,71 @@ stopped using is only forgotten when *some* request arrives after the TTL, so it
 holds a `ModelSession` (and its socket) until then. An interval sweeper was
 considered and not added — the pool is one process on one host with a handful of
 conversations, and the sweep would need its own clock under test for little gain.
+
+### F111 — the personal token is minted by sending one message; a send usually yields a new token 🟢 (measured live, corrected)
+
+Driven from the operator's real Chrome over CDP (capture profile, free consumer
+account), 2026-10-23 03:08–04:25Z. Design + consequences:
+`docs/personal-mint-design.md`.
+
+**How we got the mint wrong, and then right.** The first session (03:08–03:20Z)
+included two sends **3 minutes apart** that returned the **same** token. That one
+pair produced the conclusion "the token rotates on the page's own clock, not per
+send", which went into an early draft of the design doc. A second run — a token
+watcher sending every **10 minutes**, 6 rounds, real harvest path — returned a
+**different** token in **5 of 6** rounds:
+
+| round | UTC | tail | rotated |
+|---|---|---|---|
+| 1 | 03:33 | `MUrQDfkE7o` | (baseline) |
+| 2 | 03:43 | `sQUZIuzePI` | ✅ |
+| 3 | 03:53 | `ejVrCkWOkA` | ✅ |
+| 4 | 04:04 | `ymnaDJ_1h4` | ✅ |
+| 5 | 04:14 | `La0rVlVm-k` | ✅ |
+| 6 | 04:24 | `fG12l8a9v8` | ✅ |
+
+So **a send normally does buy a new token**, and the 3-minute pair is the
+exception, not the rule. n=1 produced a wrong general rule — the AGENTS.md
+warning applied to us. The design does not depend on which way it goes (the mint
+compares the token either way), but the *documentation* did, and it was fixed.
+
+**What the same session confirmed:**
+
+| Probe | Result |
+|---|---|
+| Chathub socket on page load | **does not open** — only `go.trouter.skype.com` |
+| Chathub socket on composer focus | **0 websockets** |
+| Send → socket | opens ~1 s after Enter, closes ~6 s later |
+| Socket token findable in page storage | **absent** (localStorage/sessionStorage/IndexedDB/Cache Storage) |
+| Socket token on a 1 h-old record served by the real page | page minted a fresh one |
+
+1. The page opens its Chathub socket **only when a message is sent**. There is no
+   long-lived connection to piggyback on and nothing to harvest passively.
+2. A send **usually** yields a new token (5/6 above), **not always** (the 3-minute
+   pair). A mint must compare the token it read against the one it had instead of
+   assuming either outcome.
+3. **The socket token is not in page storage.** The only source is a live socket
+   URL. (This also means: no cheap, turn-free way to read it.)
+4. **The 1 h TTL is not a measured lifetime.** A captured token kept serving
+   turns ≥ **77 min** after capture. The page's MSAL cache for the same account
+   carries a readable `expiresOn` of **8 h** (`03:08Z → 11:08Z`) — for *other*
+   scopes, so it does not fix the socket token's lifetime, but it makes 1 h look
+   like a floor, not a ceiling. `M365_PERSONAL_TOKEN_TTL_MS` stays as a
+   **staleness policy**.
+5. A `refreshtoken` entry appeared in the page's MSAL cache in one read and was
+   gone in the next. **Not** a usable contract — do not build on it.
+
+**Not confirmed / still open:** the socket token's true lifetime is still
+unmeasured (*when it becomes invalid*, as opposed to *when the page replaces it*
+— the watcher measures replacement). The verification gate never appeared
+(≈10 sends across one session); n is small and F100/F101 stand.
+
+**Fix landed from this:** the mint now **harvests** by default
+(`M365_PERSONAL_MINT_STRATEGY=harvest`): attach to the operator's running Chrome
+over CDP, send one short message to force the Chathub socket, read the token off
+it, and record whether it actually rotated. Live end-to-end on this host:
+**2.3 s**, record rewritten with a genuinely new token. Launch-capture is kept
+behind `M365_PERSONAL_MINT_STRATEGY=capture`. Failures now name the real obstacle
+(`chrome_unreachable`, `no_chat_tab`, `mint_not_rotated`) instead of advising
+`login` for all of them. Code: `personal-harvest.ts`, `personal-harvest-cdp.ts`,
+`personal-auth.ts`; tests: `personal-harvest.test.ts`, `personal-auth.test.ts`.

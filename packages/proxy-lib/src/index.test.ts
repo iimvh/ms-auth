@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createApp } from "./index.js";
 
-// This whole suite hits real M365 (auth, WS, agent creation, ~600-msg quota),
-// so it has to be opt-in. Without the guard, `pnpm test` waits 2 min for an
-// interactive login that no automated runner can provide. Matches the
-// convention in tools.test.ts (none of those tests need M365_LIVE because
-// they're pure).
 const LIVE = process.env.M365_LIVE === "1";
 
 const tools = [
@@ -68,13 +63,10 @@ describe.skipIf(!LIVE)("proxy-lib e2e with tools (live)", () => {
     const choice = body.choices[0];
     expect(choice.message.role).toBe("assistant");
 
-    // M365 Copilot may or may not follow our tool-calling protocol.
-    // If it does produce a tool call, do a follow-up turn.
     if (choice.finish_reason === "tool_calls" && choice.message.tool_calls?.length > 0) {
       const toolCall = choice.message.tool_calls[0];
       console.log(`Tool call: ${toolCall.function.name}(${toolCall.function.arguments})`);
 
-      // Simulate tool execution
       let toolResult: string;
       if (toolCall.function.name === "bash") {
         const args = JSON.parse(toolCall.function.arguments);
@@ -97,7 +89,6 @@ describe.skipIf(!LIVE)("proxy-lib e2e with tools (live)", () => {
       }
       console.log("Tool result:", toolResult.slice(0, 500));
 
-      // Turn 2: send tool result back
       const res2 = await app.fetch(
         chatRequest([
           { role: "user", content: "what npm deps do i have in this folder? use your bash and read_file tools to find out. start by running cat package.json" },
@@ -122,7 +113,6 @@ describe.skipIf(!LIVE)("proxy-lib e2e with tools (live)", () => {
       const choice2 = body2.choices[0];
       expect(choice2.message.content).toBeTruthy();
     } else {
-      // Model responded with plain text — still a valid response
       console.log("Model responded without tool calls (M365 Copilot overrode tool-calling protocol)");
       expect(choice.message.content).toBeTruthy();
     }

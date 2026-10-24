@@ -43,19 +43,21 @@ or after the move.
 ## Allow-list
 
 These are kept, or converted, as stated. Everything else in
-`packages/core/src` and `packages/proxy-lib/src` is deleted.
+`packages/core/src`, `packages/proxy-lib/src` and the one file named below
+(`packages/proxy/ui/raw-plugin.ts`) is deleted.
 
 | Location | Treatment | Reason |
 |---|---|---|
 | `core/src/account-registry.ts:45–60` | keep | Defines the id grammar and the pre-accounts layout; neither is derivable from code |
-| `core/src/account-registry.ts:136–173` | keep, moves to `testing.ts` | States what the mock registry deliberately does not emulate |
+| `core/src/account-registry.ts:136–173` | keep, in place | States what the mock registry deliberately does not emulate. `testing.ts` was never created, so the note stays where the mock lives |
 | `core/src/account-registry.ts:363–411` | keep | Describes the layout that existed before accounts existed |
 | `core/src/account-registry.ts:796–812` | delete | Precedence is already asserted in `account-registry.test.ts:389–412` |
 | `core/src/account-registry.ts:554` | delete | `PersonalRecordState` states it |
-| `core/src/session.ts` header and `dumpFrame` | keep 3 lines | `M365_DUMP_FRAMES` writes to `FRAME_DIR`; the variable's effect is environmental |
-| `core/src/session.ts` frame comments | delete after #2 and #3 land | Convert to `frames.ts` schemas and a replay test first |
+| `core/src/session.ts` header and `dumpFrame` | keep 1 line | `M365_DUMP_FRAMES` writes to `FRAME_DIR`; the variable's effect is environmental |
+| `core/src/session.ts` frame comments | delete | `frame-replay.ts` schemas and `frame-replay.test.ts` pin the frame shape (#2) |
 | `core/src/fenced.ts:1–60` | delete | The measurement is in `README.md` and `docs/hypotheses.md` §9, and `fenced.test.ts` asserts the behaviour |
 | `core/src/fenced.ts` variant docs | delete | The variant name is the documentation; see ADR-0001 |
+| `core/src/fenced.ts` shell aliasing | keep | M365 reliably emits only fenced shell blocks, so they must be routed to the harness's shell tool whatever it is named |
 | `core/src/copilot.ts:1–150` | keep one block, delete the rest | One block states what the tone table is; the table is self-describing |
 | `core/src/copilot.ts:300–380` | delete | Which set Microsoft defines versus which we choose belongs in a test |
 | `core/src/turn-budget.ts:1–40` | keep one cross-reference | The throttle formula is not derivable from code; it is written up in `docs/hypotheses.md` |
@@ -83,18 +85,27 @@ These are kept, or converted, as stated. Everything else in
 
 ## Consequences
 
-- About 2,340 comment lines are deleted; about 14 blocks (roughly 60 lines) remain.
+- 3,272 comment lines are deleted across the two packages (3,406 to 134); 12
+  blocks (44 lines) remain in non-test source, every one named above.
+  `streaming.test.ts` keeps its comments because #6 requires it to land
+  unmodified.
 - The six prose-only behaviours now have code (#16): precedence in
   `account-registry.test.ts`, record state pinned by `PersonalRecordProblemSchema`
   and `PersonalRecordState`, error codes by `PERSONAL_AUTH_ERROR_CODES`, rate
   limits by `personal-mint-limits.ts`, the secrets file shape by
   `SecretsFileSchema`, and the `pollForToken` hang by an assertion in
   `auth.test.ts`. Every "delete after X" row on those has become a plain delete.
-- Frame-format comments in `session.ts` cannot be deleted until recorded frame
-  fixtures exist and a replay test covers them (#2, #3). Until then they are
-  converted, not removed, and that conversion belongs to the fixtures task.
+- Frame-format comments in `session.ts` are deleted now, not deferred to #3: #2
+  landed the zod schemas and a replay test that pins the frame shape, which is
+  what those rows were waiting on. #3 adds recorded captures on top; it does not
+  change the schema contract.
 - Reviewing the deletion is possible because the allow-list names every survivor.
   Reviewing it by reading the diff is not.
+- Comment-derived graph data had to be regenerated: the boundary scanner's
+  import regex matched prose inside comments, recording two phantom nodes
+  (`"never logged in"`, `"captured but broken"`). They were never edges, and
+  drift is reported but never gates the check, so removing them narrows the
+  baseline rather than weakening it.
 
 ## Rejected alternatives
 

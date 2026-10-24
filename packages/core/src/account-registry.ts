@@ -187,6 +187,9 @@ export function createMockRegistryAt(
   return source;
 }
 
+// `M365_ACCOUNT_HOME` points at the temp dir because `writeMockAccounts`
+// creates `<config>/accounts/<id>/`, so a mock built against the real config
+// dir would create directories inside the operator's live signed-in account.
 export function useMockRegistry(accounts: MockAccount[] = []): AccountRegistrySource {
   const dir = mkdtempSync(join(tmpdir(), "ar-"));
   process.env.M365_ACCOUNT_HOME = dir;
@@ -305,6 +308,9 @@ function emptyRegistry(): AccountRegistry {
   return { version: 1, activeId: "default", accounts: [] };
 }
 
+// Migration is a pointer, never a move: with no override the entry names
+// `personal-session.json` / `personal-profile` / port 9222 exactly where they
+// already are, so a Chrome that is running during the upgrade keeps working.
 export function migrateRegistry(src?: AccountRegistrySource, now: Date = new Date()): MigrationResult {
   const source = src ?? accountRegistrySource();
   const read = readRegistry(source);

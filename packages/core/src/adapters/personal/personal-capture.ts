@@ -301,7 +301,7 @@ export async function capturePersonalSession(opts: {
   // fingerprint. With a registry (an active account) or M365_PERSONAL_CDP_URL
   // set, the operator starts a REAL Chrome (`--remote-debugging-port=<port>
   // --user-data-dir=<profile dir>`) and we attach over CDP instead — nothing to
-  // launch, no automation flag (F101). The account's own CDP target is what
+  // launch, no automation flag (F101).
   const resolved = resolveAccount();
   const cdpUrl = resolved.id !== null || process.env.M365_PERSONAL_CDP_URL ? resolved.cdpUrl : null;
   const attached = cdpUrl ? await chromium.connectOverCDP(cdpUrl) : null;

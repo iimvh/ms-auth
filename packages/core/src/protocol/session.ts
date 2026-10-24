@@ -70,9 +70,7 @@ const ENTERPRISE_MESSAGE_TYPES = [
   "GeneratedCode",
 ];
 
-// --- Optional per-request frame dumping for reverse engineering ---
-// Enabled by M365_DUMP_FRAMES=1. Every SignalR frame received is appended to a
-// per-request NDJSON file under FRAME_DIR (~/.config/opencode-m365/frames/, or
+// M365_DUMP_FRAMES=1 appends every frame to <FRAME_DIR>/<requestId>.ndjson.
 const DUMP_FRAMES = !!process.env.M365_DUMP_FRAMES;
 function dumpFrame(requestId: string, parsed: unknown, direction: "recv" | "send") {
   if (!DUMP_FRAMES) return;

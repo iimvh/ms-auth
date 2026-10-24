@@ -114,8 +114,18 @@ describe("adapter boundary", () => {
     ]);
   });
 
-  it("passes when only one adapter exists", () => {
-    const root = fixture({ [`${ADAPTER_ROOT}/msal/token.ts`]: SHARED_IMPORT });
+  it("reports a violation whose import clause spans several lines", () => {
+    const root = fixture({
+      [`${ADAPTER_ROOT}/msal/wide.ts`]: "import {\n  personal,\n  other,\n} from \"../personal/personal.js\";\nexport const both = [personal, other];\n",
+      [`${ADAPTER_ROOT}/personal/personal.ts`]: "export const personal = 1;\nexport const other = 1;\n",
+    });
+    const report = checkBoundaries({ coreSrcDir: join(root, CORE_SRC), adapterRoot: ADAPTER_ROOT });
+    expect(report.violations.map((v) => `${v.importer}:${v.adapter}->${v.targetAdapter}`)).toEqual([
+      `${ADAPTER_ROOT}/msal/wide.ts:msal->personal`,
+    ]);
+  });
+
+  it("passes when only one adapter exists", () => {    const root = fixture({ [`${ADAPTER_ROOT}/msal/token.ts`]: SHARED_IMPORT });
     const report = checkBoundaries({ coreSrcDir: join(root, CORE_SRC), adapterRoot: ADAPTER_ROOT });
     expect(report.adaptersPresent).toEqual(["msal"]);
     expect(report.violations).toEqual([]);

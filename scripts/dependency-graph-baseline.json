@@ -1,6 +1,9 @@
 {
   "adapterRoot": "packages/core/src/adapters",
   "nodes": [
+    "@azure/msal-node",
+    "captured but broken",
+    "never logged in",
     "node:child_process",
     "node:crypto",
     "node:events",
@@ -77,9 +80,21 @@
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
+      "to": "@azure/msal-node",
+      "specifier": "@azure/msal-node",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "node:child_process",
       "specifier": "node:child_process",
       "line": 8
+    },
+    {
+      "from": "packages/core/src/adapters/msal/auth.ts",
+      "to": "node:fs",
+      "specifier": "node:fs",
+      "line": 2
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
@@ -103,7 +118,7 @@
       "from": "packages/core/src/adapters/msal/auth.ts",
       "to": "packages/core/src/io/log.ts",
       "specifier": "../../io/log.js",
-      "line": 36
+      "line": 32
     },
     {
       "from": "packages/core/src/adapters/msal/auth.ts",
@@ -143,6 +158,11 @@
       "from": "packages/core/src/adapters/personal/personal-auth.ts",
       "to": "packages/core/src/adapters/personal/personal-harvest.ts",
       "line": 3
+    },
+    {
+      "from": "packages/core/src/adapters/personal/personal-auth.ts",
+      "to": "packages/core/src/adapters/personal/personal-mint-limits.ts",
+      "line": 8
     },
     {
       "from": "packages/core/src/adapters/personal/personal-auth.ts",
@@ -241,6 +261,12 @@
     },
     {
       "from": "packages/core/src/adapters/personal/personal-health.ts",
+      "to": "never logged in",
+      "specifier": "never logged in",
+      "line": 10
+    },
+    {
+      "from": "packages/core/src/adapters/personal/personal-health.ts",
       "to": "packages/core/src/adapters/personal/personal-harvest-cdp.ts",
       "line": 2
     },
@@ -281,6 +307,12 @@
       "from": "packages/core/src/adapters/personal/personal-mode.ts",
       "to": "packages/core/src/adapters/personal/personal-session.ts",
       "line": 2
+    },
+    {
+      "from": "packages/core/src/adapters/personal/personal-session.ts",
+      "to": "captured but broken",
+      "specifier": "captured but broken",
+      "line": 11
     },
     {
       "from": "packages/core/src/adapters/personal/personal-session.ts",
@@ -344,6 +376,12 @@
     },
     {
       "from": "packages/core/src/app/credential.ts",
+      "to": "packages/core/src/personal-chathub/chathub.ts",
+      "specifier": "../personal-chathub/chathub.js",
+      "line": 8
+    },
+    {
+      "from": "packages/core/src/app/credential.ts",
       "to": "packages/core/src/routing/copilot.ts",
       "specifier": "../routing/copilot.js",
       "line": 6
@@ -399,7 +437,7 @@
       "from": "packages/core/src/app/personal-cli.ts",
       "to": "node:fs",
       "specifier": "node:fs",
-      "line": 2
+      "line": 1
     },
     {
       "from": "packages/core/src/app/personal-cli.ts",
@@ -505,6 +543,16 @@
     },
     {
       "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "line": 28
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/adapters/msal/auth.ts",
+      "line": 1
+    },
+    {
+      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/adapters/msal/auth.ts",
       "line": 184
     },
@@ -550,6 +598,31 @@
     },
     {
       "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/app/model.ts",
+      "line": 171
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/budget/auth-recovery.ts",
+      "line": 73
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/budget/priority-access.ts",
+      "line": 116
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/budget/turn-budget.ts",
+      "line": 209
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/framing/fenced.ts",
+      "line": 132
+    },
+    {
+      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/io/agent.ts",
       "line": 83
     },
@@ -560,13 +633,43 @@
     },
     {
       "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/io/image.ts",
+      "line": 13
+    },
+    {
+      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/io/log.ts",
       "line": 208
     },
     {
       "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/personal-chathub/chathub.ts",
+      "line": 149
+    },
+    {
+      "from": "packages/core/src/index.ts",
       "to": "packages/core/src/personal-chathub/probe.ts",
       "line": 156
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/protocol/session.ts",
+      "line": 142
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/routing/copilot.ts",
+      "line": 85
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/tools/native-actions.ts",
+      "line": 160
+    },
+    {
+      "from": "packages/core/src/index.ts",
+      "to": "packages/core/src/tools/tools.ts",
+      "line": 186
     },
     {
       "from": "packages/core/src/index.ts",
@@ -803,6 +906,23 @@
     },
     {
       "from": "packages/core/src/protocol/session.ts",
+      "to": "packages/core/src/protocol/schemas.ts",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/protocol/session.ts",
+      "to": "packages/core/src/routing/copilot.ts",
+      "specifier": "../routing/copilot.js",
+      "line": 13
+    },
+    {
+      "from": "packages/core/src/protocol/session.ts",
+      "to": "packages/core/src/tools/native-actions.ts",
+      "specifier": "../tools/native-actions.js",
+      "line": 18
+    },
+    {
+      "from": "packages/core/src/protocol/session.ts",
       "to": "packages/core/src/turn-context.ts",
       "specifier": "../turn-context.js",
       "line": 27
@@ -830,6 +950,12 @@
       "to": "packages/core/src/protocol/schemas.ts",
       "specifier": "../protocol/schemas.js",
       "line": 1
+    },
+    {
+      "from": "packages/core/src/tools/tools.ts",
+      "to": "packages/core/src/framing/fenced.ts",
+      "specifier": "../framing/fenced.js",
+      "line": 2
     },
     {
       "from": "packages/core/src/tools/tools.ts",

@@ -56,7 +56,8 @@ export interface GraphDrift {
 }
 
 const CODE_FILE = /\.(?:ts|mts|tsx|js|mjs)$/;
-const SPECIFIER = /^(?!\s*(?:\/\/|\/\*|\*))[ \t]*(?:(?:import|export)\b[^;'"*\n]*?\bfrom[ \t]*|(?:const|let|var)[ \t]+[^=;*\n]*?=[ \t]*require[ \t]*\([ \t]*)(["'])([^"'\n]+)\1|\b(?:import|require)[ \t]*\([ \t]*(["'])([^"'\n]+)\3/gm;
+const FROM_CLAUSE = /^(?!\s*(?:\/\/|\/\*|\*))[ \t]*(?:(?:import|export)\b[\s\S]*?\bfrom[ \t]*|(?:const|let|var)[ \t]+[\s\S]*?=[ \t]*require[ \t]*\([ \t]*)(["'])([^"'\n]+)\1/gm;
+const DYNAMIC_CLAUSE = /\b(?:import|require)[ \t]*\([ \t]*(["'])([^"'\n]+)\1/g;
 const RESOLVE_SUFFIXES = ["", ".ts", ".tsx", ".mts", ".js", ".mjs", "/index.ts", "/index.js", "/index.mjs"];
 
 const toPosix = (p: string) => p.split(sep).join("/");
@@ -83,10 +84,8 @@ export function coreFiles(srcDir: string): string[] {
 }
 
 export function importedSpecifiers(source: string): { specifier: string; line: number }[] {
-  return [...source.matchAll(SPECIFIER)].map((match) => ({
-    specifier: match[2] ?? match[4],
-    line: source.slice(0, match.index).split("\n").length,
-  }));
+  const at = (match: RegExpMatchArray) => ({ specifier: match[2], line: source.slice(0, match.index).split("\n").length });
+  return [...source.matchAll(FROM_CLAUSE), ...source.matchAll(DYNAMIC_CLAUSE)].map(at);
 }
 
 function candidatePaths(file: string, specifier: string): string[] {

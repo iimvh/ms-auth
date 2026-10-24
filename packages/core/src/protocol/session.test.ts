@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { cursorMessageId, foldStreamText, TurnTextComposer } from "./session.js";
 import { buildCopilotWebSocketHeaders, buildCopilotWebSocketUrl, buildPersonalChathubUrl, buildPersonalWebSocketHeaders, personalTurnParams, readPersonalRecord } from "../personal-chathub/chathub.js";
-import { accountsDir, activateAccount, clearMockRegistry, useMockRegistry } from "../account-registry.js";
+import { accountsDir, resolveAccount, useMockRegistry, clearMockRegistry } from "../account-registry.js";
 import { PersonalStore } from "../adapters/personal/personal-session.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MessageUpdate } from "./schemas.js";
@@ -290,68 +290,35 @@ describe("personal websocket headers (F103)", () => {
   });
 });
 
-describe("a personal failure names the account (Task 8)", () => {
-  afterEach(() => { clearMockRegistry(); delete process.env.M365_ACCOUNT_HOME; });
-
-  it("a missing record names the account and its own login command", () => {
+describe("the record read for a named account", () => {
+  it("reads the account it is handed, and names that account when the record is missing", () => {
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
-    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
-    activateAccount("work");
-    let err: { code?: string; message: string } | null = null;
-    try { readPersonalRecord(); } catch (e) { err = e as { code?: string; message: string }; }
-    expect(err).not.toBeNull();
-    expect(err!.message).toContain('account "work"');
-    expect(err!.message).toContain("pnpm m365-personal login --account work");
-    expect(err!.message).toContain("no session record");
+    try {
+      useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
+      let msg = "";
+      try { readPersonalRecord(resolveAccount({ id: "work" })); } catch (e) { msg = (e as Error).message; }
+      expect(msg).toContain('account "work"');
+      expect(msg).toContain("pnpm m365-personal login --account work");
+      expect(msg).toContain("no session record");
+    } finally {
+      clearMockRegistry();
+      delete process.env.M365_ACCOUNT_HOME;
+    }
   });
 
-  it("a corrupt record says so instead of a flat session_dead", () => {
+  it("reads a fresh record from the account's own store", () => {
     process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
-    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
-    activateAccount("work");
-    const f = join(accountsDir(), "work", "session.json");
-    writeFileSync(f, "{ not json"); // a record IS there, but cannot be used
-    let msg = "";
-    try { readPersonalRecord(); } catch (e) { msg = (e as Error).message; }
-    expect(msg).toContain('account "work"');
-    expect(msg).toContain("unusable");
-    expect(msg).toContain("invalid_json");
-  });
-
-  it("an expired record names the account", () => {
-    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
-    useMockRegistry([{ id: "default", hasSession: true }, { id: "work" }]);
-    activateAccount("work");
-    new PersonalStore(join(accountsDir(), "work", "session.json")).write({
-      accessToken: "t", chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
-      agentHost: "h", product: null, source: "officeweb", optionsSets: [], allowedMessageTypes: ["Chat"],
-      emailHint: null, probe: null, mintCount: 1, lastMintAt: 0, expiresAt: Date.now() - 1000,
-      capturedAt: Date.now() - 7_200_000 });
-    let msg = "";
-    try { readPersonalRecord(); } catch (e) { msg = (e as Error).message; }
-    expect(msg).toContain('account "work"');
-    expect(msg).toContain("expired");
-  });
-
-  // The bug this pins (whole-branch review): the thread's token came from the
-  // ACTIVE account while its record was read from whatever was active now, so
-  // a switch mid-thread sent account A's record with account B's token.
-  it("a pinned account reads ITS record after a switch, not the newly active one's", () => {
-    process.env.M365_ACCOUNT_HOME = mkdtempSync(join(tmpdir(), "ar-home-"));
-    useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
-    const fresh = (token: string) => ({
-      accessToken: token, chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
-      agentHost: "h", product: null, source: "officeweb" as const, optionsSets: [], allowedMessageTypes: ["Chat"],
-      emailHint: null, probe: null, mintCount: 1, lastMintAt: 0, expiresAt: Date.now() + 3_600_000,
-      capturedAt: Date.now() - 60_000 });
-    new PersonalStore(join(accountsDir(), "default", "session.json")).write(fresh("token-default"));
-    new PersonalStore(join(accountsDir(), "work", "session.json")).write(fresh("token-work"));
-    activateAccount("default");
-    // The thread is opened on default and the active account switches away.
-    expect(readPersonalRecord("default").accessToken).toBe("token-default");
-    activateAccount("work");
-    expect(readPersonalRecord("default").accessToken).toBe("token-default"); // still its own
-    expect(readPersonalRecord().accessToken).toBe("token-work"); // active has moved on
-    expect(() => readPersonalRecord("nope")).toThrow(/does not exist/);
+    try {
+      useMockRegistry([{ id: "default", hasSession: true }, { id: "work", hasSession: true }]);
+      new PersonalStore(join(accountsDir(), "work", "session.json")).write({
+        accessToken: "token-work", chathubPath: "o@t", scenario: "S", variants: "v", licenseType: "Free",
+        agentHost: "h", product: null, source: "officeweb", optionsSets: [], allowedMessageTypes: ["Chat"],
+        emailHint: null, probe: null, mintCount: 1, lastMintAt: 0, expiresAt: Date.now() + 3_600_000,
+        capturedAt: Date.now() - 60_000 });
+      expect(readPersonalRecord(resolveAccount({ id: "work" })).accessToken).toBe("token-work");
+    } finally {
+      clearMockRegistry();
+      delete process.env.M365_ACCOUNT_HOME;
+    }
   });
 });

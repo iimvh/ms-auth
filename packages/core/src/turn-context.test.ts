@@ -1,7 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { TurnContext } from "./turn-context.js";
 
 const seams = vi.hoisted(() => ({
@@ -30,6 +27,10 @@ vi.mock("./account-registry.js", async (importOriginal) =>
   seams.wrap("account-registry", await importOriginal<Record<string, unknown>>()));
 vi.mock("./adapters/personal/personal-mode.js", async (importOriginal) =>
   seams.wrap("personal-mode", await importOriginal<Record<string, unknown>>()));
+vi.mock("./adapters/msal/auth.js", async (importOriginal) =>
+  seams.wrap("msal-auth", await importOriginal<Record<string, unknown>>()));
+vi.mock("./personal-chathub/chathub.js", async (importOriginal) =>
+  seams.wrap("chathub", await importOriginal<Record<string, unknown>>()));
 
 vi.mock("ws", async () => ({ default: (await import("./protocol/socket-fixture.js")).RecordingWebSocket }));
 
@@ -38,10 +39,13 @@ const { CopilotSession } = await import("./protocol/session.js");
 
 const CONTEXT: TurnContext = {
   token: "jwe-token",
+  accountId: "work",
+  personal: true,
   socketUrl: "wss://substrate.office.com/m365Copilot/Chathub/oid-1@tid-1?scenario=S",
   headers: { Origin: "https://m365.cloud.microsoft", "User-Agent": "context-agent" },
   payloadDefaults: { scenario: "OfficeWebIncludedCopilot", licenseType: "Free" },
   capabilities: ["code_interpreter"],
+  record: null,
 };
 const ANSWER = "hello from the context";
 
@@ -54,7 +58,7 @@ afterEach(() => {
 
 describe("a session with a turn context (#8)", () => {
   it("performs a turn from the context without the auth mode or an account", async () => {
-    const session = new CopilotSession({ turnContext: CONTEXT });
+    const session = new CopilotSession({ turnContext: () => CONTEXT, accountId: "work" });
     process.env.M365_AUTH = "bogus";
     seams.armed = true;
 
@@ -79,7 +83,7 @@ describe("a session with a turn context (#8)", () => {
   });
 
   it("takes its capabilities from the context, not from the operator's environment", async () => {
-    const session = new CopilotSession({ turnContext: CONTEXT });
+    const session = new CopilotSession({ turnContext: () => CONTEXT });
     process.env.M365_NO_CODE_INTERPRETER = "1";
     seams.armed = true;
 
@@ -91,12 +95,36 @@ describe("a session with a turn context (#8)", () => {
     expect(recording.sent.join("")).toContain("cwc_code_interpreter");
   });
 
-  it("leaves a session built the old way reading the auth mode", () => {
+  it("builds the context afresh for every turn, so a context builder is asked per turn", async () => {
+    const plans: Array<{ sessionId: string; model: string; agentId: string | undefined }> = [];
+    const session = new CopilotSession({
+      sessionId: "sid-fixed",
+      conversationId: "cid-fixed",
+      agentId: "agent-1",
+      turnContext: (plan) => {
+        plans.push({ sessionId: plan.sessionId, model: plan.model, agentId: plan.agentId });
+        return CONTEXT;
+      },
+    });
+
+    const first = session.chat("ignored-token", "one", "claude-sonnet");
+    recording.emit("message", handshake());
+    await first;
+    const second = session.chat("ignored-token", "two", "m365-copilot");
+    recording.emit("message", handshake());
+    await second;
+    expect(plans).toEqual([
+      { sessionId: "sid-fixed", model: "claude-sonnet", agentId: "agent-1" },
+      { sessionId: "sid-fixed", model: "m365-copilot", agentId: "agent-1" },
+    ]);
+  });
+
+  it("refuses to be built without a context: there is no mode-reading fallback left", () => {
     process.env.M365_AUTH = "bogus";
-    const session = new CopilotSession();
     seams.armed = true;
 
-    expect(() => session.chat("ignored-token", "hi")).toThrow();
-    expect(seams.touched).toEqual(["personal-mode.isPersonalMode"]);
+    // @ts-expect-error a session without a context is a compile-time error
+    expect(() => new CopilotSession()).toThrow();
+    expect(seams.touched).toEqual([]);
   });
 });

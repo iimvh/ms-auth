@@ -1,29 +1,21 @@
-import { getToken } from "../adapters/msal/auth.js";
-import { getPersonalToken } from "../adapters/personal/personal-auth.js";
-import { isPersonalMode } from "../adapters/personal/personal-mode.js";
 import { getOrCreateAgent } from "../io/agent.js";
 import { CopilotSession } from "../protocol/session.js";
 import { uploadImage, type ImageAnnotation } from "../io/image-input.js";
 import { createLogger, trunc } from "../io/log.js";
 import { awaitTurnBudget } from "../budget/turn-budget.js";
 import type { CopilotStream } from "../routing/copilot.js";
+import { agentAllowed, imagesAllowed, selectCredential, turnContextFor, type CredentialSelection } from "./credential.js";
 
 const log = createLogger("model");
 
-function modeToken(): () => Promise<string> {
-  return isPersonalMode() ? getPersonalToken : getToken;
-}
-
 export interface ModelSessionOptions {
-  /** Pre-resolved auth token. If not provided, getToken() is called. */
-  getToken?: () => Promise<string>;
   /**
    * The personal account this session serves (§7.6), fixed for its whole life.
-   * The token, the record and the CDP endpoint must all come from the same
-   * account: a thread opened on one account must never send another's token
-   * with this one's captured params — silent cross-account corruption, the
-   * worst failure this design can produce (§7.2). null/absent = the builtin
-   * layout. Enterprise (MSAL) mode ignores it.
+   * The token and the record must both come from the same account: a thread
+   * opened on one account must never send another's token with this one's
+   * captured params — silent cross-account corruption, the worst failure this
+   * design can produce (§7.2). null/absent = the active account. Enterprise
+   * (MSAL) mode ignores it.
    */
   accountId?: string | null;
   /** Whether to attempt agent resolution. Default: true. */
@@ -45,11 +37,10 @@ export interface ModelSessionOptions {
  * instead of creating a new one.
  */
 export class ModelSession {
-  private resolveToken: () => Promise<string>;
-  /** The account this session serves for its whole life; null = builtin. */
   readonly accountId: string | null;
   private useAgent: boolean;
   private temporaryChat: boolean;
+  private selection: CredentialSelection | null = null;
   private copilotSession: CopilotSession | null = null;
   private cachedAgentId: string | null | undefined = undefined;
 
@@ -70,16 +61,8 @@ export class ModelSession {
   }
 
   constructor(options: ModelSessionOptions = {}) {
-    // A pinned account binds the DEFAULT token resolution to that account, so a
-    // later switch of the active account cannot hand this session another
-    // account's token (see ModelSessionOptions.accountId).
-    const pinned = options.accountId ?? null;
-    this.accountId = pinned;
-    this.resolveToken = options.getToken
-      ?? (pinned !== null && isPersonalMode() ? () => getPersonalToken({ accountId: pinned }) : modeToken());
-    // Personal mode forces the tool agent OFF (spec §10.4) while still
-    // honouring an explicit useAgent: false.
-    this.useAgent = options.useAgent !== false && !(isPersonalMode() && !options.useAgent);
+    this.accountId = options.accountId ?? null;
+    this.useAgent = options.useAgent !== false;
     this.temporaryChat =
       options.temporaryChat ?? process.env.M365_SAVE_HISTORY !== "1";
   }
@@ -92,13 +75,19 @@ export class ModelSession {
   /** Agent id baked into the current copilotSession (undefined = no agent). */
   private currentAgentId: string | undefined = undefined;
 
-  private createCopilotSession(agentId: string | undefined): CopilotSession {
+  private createCopilotSession(
+    agentId: string | undefined,
+    selection: CredentialSelection,
+    model: string,
+  ): CopilotSession {
     return new CopilotSession({
       agentId,
       sessionId: this.sessionId,
       conversationId: this.conversationId,
       temporaryChat: this.temporaryChat,
       accountId: this.accountId,
+      model,
+      turnContext: (plan) => turnContextFor(selection, plan),
     });
   }
 
@@ -129,7 +118,8 @@ export class ModelSession {
     images: string[] = [],
     waitForBudget: () => Promise<{ waitedMs: number }> = () => awaitTurnBudget({ signal }),
   ): Promise<CopilotStream> {
-    let token = await this.resolveToken();
+    this.selection = await selectCredential(this.accountId);
+    let token = this.selection.token;
     // Image input (#39): upload each image for this conversation; the message points at them.
     // A failed upload is said in the text, so the model doesn't answer about an image it never got.
     const annotations: ImageAnnotation[] = [];
@@ -143,7 +133,7 @@ export class ModelSession {
 (Note: an attached image could not be passed on — ${err.message.slice(0, 120)}. Don't describe it; say it didn't arrive.)`;
       }
     }
-    const wantAgent = this.useAgent && useAgent;
+    const wantAgent = agentAllowed(this.selection, this.useAgent && useAgent);
 
     // Resolve agent ID lazily (persists across resets), only when wanted.
     if (wantAgent && this.cachedAgentId === undefined) {
@@ -157,24 +147,18 @@ export class ModelSession {
     }
     const agentForTurn = wantAgent ? (this.cachedAgentId ?? undefined) : undefined;
 
+    const generateImages = imagesAllowed(this.selection, agentForTurn);
+    const turnOpts = { generateImages, images: annotations };
+
     // Create (or recreate) the session when missing or when this turn's
     // agent-ness differs from the current session's — switching the agent on/off
     // changes routing, so the WS session must carry the right threadLevelGptId.
     if (!this.copilotSession || this.currentAgentId !== agentForTurn) {
-      this.copilotSession = this.createCopilotSession(agentForTurn);
+      this.copilotSession = this.createCopilotSession(agentForTurn, this.selection, model);
       this.currentAgentId = agentForTurn;
     }
 
     log.info(`run: model=${model}, agent=${agentForTurn ?? "none"}, turn=${this.copilotSession.turnCount}, sid=${this.sessionId}, cid=${this.conversationId}, text=${JSON.stringify(trunc(text, 200))}`);
-
-    // Match the GUI: on the agent-less path, image gen is always available, so a
-    // plain "draw me an image" produces one with no special mode (§14). Kept OFF on
-    // the tool-calling agent path — image optionsSets are agent-less, and we don't
-    // want the image tool competing with fenced tool-call emission. Opt out with
-    // M365_NO_IMAGE_GEN for a pure-text agent-less turn. Personal mode (spec
-    // §10.4) is always OFF: the renderer needs an MSAL-only artifact token an
-    // MSA session cannot mint.
-    const turnOpts = { generateImages: !isPersonalMode() && !agentForTurn && !process.env.M365_NO_IMAGE_GEN, images: annotations };
 
     try {
       return await this.copilotSession.chat(token, text, model, signal, turnOpts);
@@ -185,8 +169,11 @@ export class ModelSession {
       // otherwise it skips the wait and its recordTurn takes the grant of a turn
       // another request was let through for (#77). A token held through a long
       // wait may be near its end, so fetch it again.
-      if ((await waitForBudget()).waitedMs > 0) token = await this.resolveToken();
-      this.copilotSession = this.createCopilotSession(agentForTurn);
+      if ((await waitForBudget()).waitedMs > 0) {
+        this.selection = await selectCredential(this.accountId);
+        token = this.selection.token;
+      }
+      this.copilotSession = this.createCopilotSession(agentForTurn, this.selection, model);
       this.currentAgentId = agentForTurn;
       return await this.copilotSession.chat(token, text, model, signal, turnOpts);
     }

@@ -47,6 +47,7 @@ export interface PersonalAuthDeps {
    *  mint mutex and the pre-flight cache are keyed on it, so one account's
    *  mint can never satisfy, or block, another's. */
   accountId?: AccountId | null;
+  record?: PersonalRecord | null;
   capture: (headed: boolean) => Promise<PersonalCapture>;
   /** Absent means "no harvest available" (tests, and a deliberate capture-only
    *  mint when M365_PERSONAL_MINT_STRATEGY=capture). */
@@ -160,6 +161,7 @@ function stateKey(accountId: AccountId | null | undefined): string {
  *  login command when the profile is dead. */
 export async function getPersonalToken(deps?: Partial<PersonalAuthDeps>): Promise<string> {
   const d: PersonalAuthDeps = { ...defaultDeps(), ...deps };
+  if (d.record && d.store.isFresh(d.record, d.now())) return d.record.accessToken;
   const state = inspectQuietly(d.store);
   const record = state.ok ? state.record : null;
   if (record && d.store.isFresh(record, d.now())) return record.accessToken;

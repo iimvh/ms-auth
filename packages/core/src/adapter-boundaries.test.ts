@@ -149,6 +149,14 @@ describe("adapter boundary", () => {
 });
 
 describe("dependency graph baseline", () => {
+  it("keeps the transport free of every auth, personal and account module (#9)", () => {
+    const graph = buildGraph({ adapterRoot: ADAPTER_ROOT });
+    const transport = `${CORE_SRC}/protocol/session.ts`;
+    const reach = graph.edges.filter((edge) => edge.from === transport).map((edge) => edge.to);
+    expect(reach.filter((to) => /adapters\/|account-registry|personal-chathub|personal-wiring/.test(to))).toEqual([]);
+    expect(reach).toContain(`${CORE_SRC}/turn-context.ts`);
+  });
+
   it("matches the committed baseline and reports no drift", () => {
     const graph = buildGraph({ adapterRoot: ADAPTER_ROOT });
     const drift = compareToBaseline(graph, loadBaseline());
@@ -188,7 +196,15 @@ describe("dependency graph baseline", () => {
     expect(baseline.nodes).toContain(`${CORE_SRC}/index.ts`);
     expect(baseline.nodes).toContain(`${CORE_SRC}/protocol/session.ts`);
     expect(baseline.nodes).toContain(`${ADAPTER_ROOT}/msal/auth.ts`);
-    expect(baseline.edges.some((e: { from: string; to: string }) => e.from === `${CORE_SRC}/app/model.ts` && e.to === `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
+    const reaches = (from: string, to: string) =>
+      baseline.edges.some((e: { from: string; to: string }) => e.from === from && e.to === to);
+    // The credential decision lives in the app; the transport is handed a context
+    // and reaches no adapter, auth or account module at all (#9).
+    expect(reaches(`${CORE_SRC}/app/credential.ts`, `${CORE_SRC}/adapters/msal/auth.ts`)).toBe(true);
+    expect(reaches(`${CORE_SRC}/app/credential.ts`, `${CORE_SRC}/adapters/personal/personal-auth.ts`)).toBe(true);
+    for (const adapter of [`${ADAPTER_ROOT}/msal/auth.ts`, `${ADAPTER_ROOT}/personal/personal-auth.ts`, `${CORE_SRC}/account-registry.ts`]) {
+      expect(reaches(`${CORE_SRC}/protocol/session.ts`, adapter)).toBe(false);
+    }
     expect(baseline.nodes.length).toBeGreaterThan(20);
   });
 });

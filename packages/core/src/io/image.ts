@@ -11,6 +11,7 @@
 
 import { getToken, getImageArtifactToken } from "../adapters/msal/auth.js";
 import { CopilotSession } from "../protocol/session.js";
+import { selectCredential, turnContextFor } from "../app/credential.js";
 import { createLogger, trunc } from "./log.js";
 import { awaitTurnBudget } from "../budget/turn-budget.js";
 import type { CapturedImage } from "../routing/copilot.js";
@@ -141,7 +142,11 @@ export async function generateImage(
   const model = opts.model ?? "m365-copilot";
   const effectivePrompt = buildImagePrompt(prompt, { orientation: opts.orientation, style: opts.style });
 
-  const session = new CopilotSession();
+  const selection = await selectCredential(null);
+  const session = new CopilotSession({
+    model,
+    turnContext: (plan) => turnContextFor(selection, { ...plan, images: true }),
+  });
   await awaitTurnBudget({ signal: opts.signal });
   const stream = await session.chat(token, effectivePrompt, model, opts.signal, { generateImages: true });
 

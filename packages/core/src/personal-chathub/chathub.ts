@@ -1,7 +1,8 @@
 import { PersonalAuthError, personalLoginCommand } from "../adapters/personal/personal-auth.js";
 import type { PersonalCapture, PersonalRecord } from "../adapters/personal/personal-session.js";
 import { PersonalStore } from "../adapters/personal/personal-session.js";
-import { loginCommandFor, resolveAccount } from "../account-registry.js";
+import type { ResolvedAccount } from "../account-registry.js";
+import { loginCommandFor } from "../account-registry.js";
 import { ACTION_ALLOWED_MESSAGE_TYPES } from "../tools/native-actions.js";
 
 /**
@@ -56,11 +57,10 @@ export function buildPersonalChathubUrl(
  *  not a flat `session_dead` (§7.5). With several accounts, "which one" is the
  *  first thing the operator needs.
  *
- *  `accountId` pins the account: a thread passes the one it was opened on, so
- *  its record cannot come from a different account than the token the caller
- *  resolved from the same id. Omitted = the active account. */
-export function readPersonalRecord(accountId?: string | null): PersonalRecord {
-  const account = accountId === undefined ? resolveAccount() : resolveAccount({ id: accountId });
+ *  The caller names the account (a `ResolvedAccount`), so this module never
+ *  resolves one: a thread passes the account it was opened on, and its record
+ *  cannot then come from whichever account is active now. */
+export function readPersonalRecord(account: ResolvedAccount): PersonalRecord {
   const whose = account.id ? `account "${account.id}"` : "the personal account";
   const login = account.id ? loginCommandFor(account.id) : personalLoginCommand();
   const store = new PersonalStore(account.sessionFile);

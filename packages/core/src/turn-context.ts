@@ -13,8 +13,11 @@ export interface CredentialSource {
 
 export interface TurnContext {
   token: string;
+  accountId: AccountId | null;
+  personal: boolean;
   socketUrl: string;
   headers: Record<string, string>;
   payloadDefaults: Record<string, unknown>;
   capabilities: string[];
+  record: PersonalRecord | null;
 }

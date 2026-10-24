@@ -22,6 +22,9 @@ const CONTEXT: TurnContext = {
   headers: { Origin: "https://m365.cloud.microsoft", "User-Agent": "replay-agent" },
   payloadDefaults: { scenario: "OfficeWebIncludedCopilot", licenseType: "Free" },
   capabilities: ["code_interpreter"],
+  accountId: "work",
+  personal: true,
+  record: null,
 };
 
 const NARRATION = "Let me look through the files in notes/.";
@@ -33,7 +36,7 @@ const ANSWER = `${NARRATION}\n\n${FENCE}${INVENTED}\n\nNow I run it:`;
 
 async function replayTurn() {
   const fixture = readFrameFixture(FIXTURE);
-  const session = new CopilotSession({ turnContext: CONTEXT });
+  const session = new CopilotSession({ turnContext: () => CONTEXT, accountId: "work" });
   const pending = session.chat("ignored-token", "grep the notes directory for the secret and run it", "claude-sonnet");
   replayFeed(fixture.received)();
   const stream = await pending;
@@ -77,7 +80,7 @@ describe("replaying a complete turn from a frame dump (#2)", () => {
   it("rejects a dump that is neither wholly synthetic nor wholly recorded", async () => {
     const { loadFrameFixture } = await import("./frame-replay.js");
     const lines = readFrameFixture(FIXTURE).lines;
-    const mixed = lines.map((line, index) => ({ ...line, synthetic: undefined })).slice(0, 1).concat(lines.slice(1));
+    const mixed = lines.map((line, index): typeof line => (index === 0 ? { ...line, synthetic: undefined } : line));
     const text = mixed.map((line) => JSON.stringify(line)).join("\n");
     expect(() => loadFrameFixture(text, "mixed.ndjson")).toThrow(/synthetic/);
   });
@@ -102,16 +105,16 @@ describe("replaying a complete turn from a frame dump (#2)", () => {
     expect(session.turnCount).toBe(1);
   });
 
-  it("takes the answer from the streamed messages, and the turn's metadata stays unset on this path", async () => {
+  it("takes the answer from the streamed messages, and reads the turn's metadata off the same frames", async () => {
     const { stream } = await replayTurn();
     expect(stream.hasContent).toBe(true);
-    expect(stream.messageId).toBeNull();
-    expect(stream.contentOrigin).toBeNull();
-    expect(stream.messageType).toBeNull();
-    expect(stream.turnState).toBeNull();
-    expect(stream.result).toBeNull();
-    expect(stream.throttle).toBeNull();
-    expect(stream.scores).toBeNull();
+    expect(stream.messageId).toBe("0b4c1d73-8888-4a69-9c32-3f6b7e8d9a01");
+    expect(stream.contentOrigin).toBe("DeepLeo");
+    expect(stream.turnState).toBe("Completed");
+    expect(stream.result?.value).toBe("Success");
+    expect(stream.turnCount).toBe(1);
+    expect(stream.throttle).toEqual({ current: 1, max: 600 });
+    expect(stream.scores).toEqual({ BotOffense: 0.0000004, dea_violation: 0.0000019 });
   });
 
   it("ends the turn on the completion frame, before the dump's stop apology", async () => {
@@ -123,7 +126,7 @@ describe("replaying a complete turn from a frame dump (#2)", () => {
   it("stops at the caller's abort the way the Stop button does", async () => {
     const controller = new AbortController();
     const fixture = readFrameFixture(FIXTURE);
-    const session = new CopilotSession({ turnContext: CONTEXT });
+    const session = new CopilotSession({ turnContext: () => CONTEXT, accountId: "work" });
     const pending = session.chat("ignored-token", "grep the notes directory for the secret and run it", "claude-sonnet", controller.signal);
     replayFeed(fixture.received.filter((frame) => frame.line <= 12))();
     const stream = await pending;

@@ -19,6 +19,7 @@
     "packages/core/src/adapters/personal/personal-mint-limits.ts",
     "packages/core/src/adapters/personal/personal-mode.ts",
     "packages/core/src/adapters/personal/personal-session.ts",
+    "packages/core/src/app/credential.ts",
     "packages/core/src/app/model.ts",
     "packages/core/src/app/personal-cli.ts",
     "packages/core/src/budget/auth-recovery.ts",
@@ -312,58 +313,87 @@
       "line": 3
     },
     {
-      "from": "packages/core/src/app/model.ts",
+      "from": "packages/core/src/app/credential.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "specifier": "../account-registry.js",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/app/credential.ts",
       "to": "packages/core/src/adapters/msal/auth.ts",
       "specifier": "../adapters/msal/auth.js",
       "line": 1
     },
     {
-      "from": "packages/core/src/app/model.ts",
+      "from": "packages/core/src/app/credential.ts",
       "to": "packages/core/src/adapters/personal/personal-auth.ts",
       "specifier": "../adapters/personal/personal-auth.js",
       "line": 2
     },
     {
-      "from": "packages/core/src/app/model.ts",
+      "from": "packages/core/src/app/credential.ts",
       "to": "packages/core/src/adapters/personal/personal-mode.ts",
       "specifier": "../adapters/personal/personal-mode.js",
       "line": 3
     },
     {
+      "from": "packages/core/src/app/credential.ts",
+      "to": "packages/core/src/adapters/personal/personal-session.ts",
+      "specifier": "../adapters/personal/personal-session.js",
+      "line": 4
+    },
+    {
+      "from": "packages/core/src/app/credential.ts",
+      "to": "packages/core/src/routing/copilot.ts",
+      "specifier": "../routing/copilot.js",
+      "line": 6
+    },
+    {
+      "from": "packages/core/src/app/credential.ts",
+      "to": "packages/core/src/turn-context.ts",
+      "specifier": "../turn-context.js",
+      "line": 7
+    },
+    {
+      "from": "packages/core/src/app/model.ts",
+      "to": "packages/core/src/app/credential.ts",
+      "line": 7
+    },
+    {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/budget/turn-budget.ts",
       "specifier": "../budget/turn-budget.js",
-      "line": 8
+      "line": 5
     },
     {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/io/agent.ts",
       "specifier": "../io/agent.js",
-      "line": 4
+      "line": 1
     },
     {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/io/image-input.ts",
       "specifier": "../io/image-input.js",
-      "line": 6
+      "line": 3
     },
     {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/io/log.ts",
       "specifier": "../io/log.js",
-      "line": 7
+      "line": 4
     },
     {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/protocol/session.ts",
       "specifier": "../protocol/session.js",
-      "line": 5
+      "line": 2
     },
     {
       "from": "packages/core/src/app/model.ts",
       "to": "packages/core/src/routing/copilot.ts",
       "specifier": "../routing/copilot.js",
-      "line": 9
+      "line": 6
     },
     {
       "from": "packages/core/src/app/personal-cli.ts",
@@ -603,14 +633,20 @@
     },
     {
       "from": "packages/core/src/io/image.ts",
+      "to": "packages/core/src/app/credential.ts",
+      "specifier": "../app/credential.js",
+      "line": 14
+    },
+    {
+      "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/budget/turn-budget.ts",
       "specifier": "../budget/turn-budget.js",
-      "line": 15
+      "line": 16
     },
     {
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/io/log.ts",
-      "line": 14
+      "line": 15
     },
     {
       "from": "packages/core/src/io/image.ts",
@@ -622,7 +658,7 @@
       "from": "packages/core/src/io/image.ts",
       "to": "packages/core/src/routing/copilot.ts",
       "specifier": "../routing/copilot.js",
-      "line": 16
+      "line": 17
     },
     {
       "from": "packages/core/src/io/log.ts",
@@ -650,6 +686,12 @@
     },
     {
       "from": "packages/core/src/personal-chathub/chathub.ts",
+      "to": "packages/core/src/account-registry.ts",
+      "specifier": "../account-registry.js",
+      "line": 5
+    },
+    {
+      "from": "packages/core/src/personal-chathub/chathub.ts",
       "to": "packages/core/src/adapters/personal/personal-auth.ts",
       "specifier": "../adapters/personal/personal-auth.js",
       "line": 1
@@ -670,7 +712,7 @@
       "from": "packages/core/src/personal-chathub/chathub.ts",
       "to": "packages/core/src/tools/native-actions.ts",
       "specifier": "../tools/native-actions.js",
-      "line": 5
+      "line": 6
     },
     {
       "from": "packages/core/src/personal-chathub/probe.ts",
@@ -737,27 +779,15 @@
     },
     {
       "from": "packages/core/src/protocol/session.ts",
-      "to": "packages/core/src/account-registry.ts",
-      "specifier": "../account-registry.js",
-      "line": 30
-    },
-    {
-      "from": "packages/core/src/protocol/session.ts",
-      "to": "packages/core/src/adapters/personal/personal-mode.ts",
-      "specifier": "../adapters/personal/personal-mode.js",
-      "line": 29
-    },
-    {
-      "from": "packages/core/src/protocol/session.ts",
       "to": "packages/core/src/budget/priority-access.ts",
       "specifier": "../budget/priority-access.js",
-      "line": 28
+      "line": 26
     },
     {
       "from": "packages/core/src/protocol/session.ts",
       "to": "packages/core/src/budget/turn-budget.ts",
       "specifier": "../budget/turn-budget.js",
-      "line": 27
+      "line": 25
     },
     {
       "from": "packages/core/src/protocol/session.ts",
@@ -769,13 +799,13 @@
       "from": "packages/core/src/protocol/session.ts",
       "to": "packages/core/src/io/log.ts",
       "specifier": "../io/log.js",
-      "line": 26
+      "line": 24
     },
     {
       "from": "packages/core/src/protocol/session.ts",
       "to": "packages/core/src/turn-context.ts",
       "specifier": "../turn-context.js",
-      "line": 31
+      "line": 27
     },
     {
       "from": "packages/core/src/protocol/session.ts",
